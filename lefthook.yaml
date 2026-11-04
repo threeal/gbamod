@@ -1,0 +1,22 @@
+pre-commit:
+  piped: true
+  fail_on_changes: always
+  fail_on_changes_diff: true
+  jobs:
+    - name: install toolchain
+      run: rustup install
+
+    - name: check types
+      run: cargo check
+
+    - name: fix lint
+      run: cargo clippy --fix --allow-dirty
+
+    - name: check lint
+      run: cargo clippy
+
+    - name: fix rust formatting
+      run: cargo fmt
+
+    - name: fix formatting
+      run: dprint fmt

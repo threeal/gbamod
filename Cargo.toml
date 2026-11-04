@@ -1,0 +1,24 @@
+[package]
+name = "bonacci"
+version = "0.1.0"
+authors = ["Leonardo Bonacci <leonardo@bonacci.com>"]
+categories = ["algorithms", "mathematics"]
+edition = "2024"
+keywords = ["fibonacci", "sequence"]
+license = "Unlicense"
+repository = "https://github.com/leonardo/bonacci"
+rust-version = "1.99"
+description = "An example library and CLI for generating a Fibonacci sequence"
+
+[dependencies]
+clap = "4.6.7"
+
+[lints.clippy]
+pedantic = "warn"
+nursery = "warn"
+cargo = "warn"
+
+[lints.rust]
+warnings = "deny"
+missing_docs = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tarpaulin_include)"] }
