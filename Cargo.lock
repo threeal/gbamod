@@ -53,13 +53,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bonacci"
-version = "0.1.0"
-dependencies = [
- "clap",
-]
-
-[[package]]
 name = "clap"
 version = "4.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -91,6 +84,13 @@ name = "colorchoice"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b6a852b24ab71dffc585bcb46eaf7959d175cb865a7152e35b348d1b2960422"
+
+[[package]]
+name = "gbamod"
+version = "0.1.0"
+dependencies = [
+ "clap",
+]
 
 [[package]]
 name = "is_terminal_polyfill"
