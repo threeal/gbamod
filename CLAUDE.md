@@ -2,11 +2,16 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-> **Template notice:** This file describes the template repository itself. In a project derived from this template, tell the user it should be replaced with project-specific guidance.
-
 ## About This Repository
 
-A minimal Rust library and CLI starter template. Its only application code is a placeholder Fibonacci implementation in `src/` — real logic is added by projects derived from it.
+gbamod is an emulator-driven Rust library and CLI for reverse engineering and patching GBA games. It isn't implemented yet: `src/` holds only a placeholder `status` function and a CLI that prints it.
+
+## Game Data
+
+Never commit game data — ROMs, savestates, memory dumps, screenshots, notes, hooks, or patches — and never name a specific game in this repository.
+
+During development, each game lives in its own folder under `.games/<game>/`, ignored by git, and the toolkit runs from inside it with `cargo run --`. The toolkit must never assume `.games/` exists; it works from the current directory or from paths it's given.
+Why: `.games/` is only a local convenience, and the released binary will run from game folders anywhere.
 
 ## Gotchas
 

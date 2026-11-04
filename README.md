@@ -1,10 +1,8 @@
-# Rust Starter
+# gbamod
 
-A minimal template for building a [Rust](https://www.rust-lang.org/) library with an optional CLI. Ships pre-configured with formatting, linting, 100% test coverage enforcement, pre-commit hooks, and CI.
+An emulator-driven toolkit for reverse engineering and patching [GBA](https://en.wikipedia.org/wiki/Game_Boy_Advance) games. It drives an emulator headlessly to dump and diff memory, set watchpoints and breakpoints, and assemble hooks into [IPS](https://zerosoft.zophar.net/ips.php) patches.
 
-## Getting Started
-
-Create a new repository from this template on GitHub using [this link](https://github.com/new?template_name=rust-starter&template_owner=threeal), or clone it locally and point it at your own remote.
+This project is at an early stage: the toolkit isn't implemented yet, and its CLI only prints a placeholder notice.
 
 ## Setup
 
@@ -26,17 +24,6 @@ Install [Lefthook](https://lefthook.dev/) and [dprint](https://dprint.dev/), the
 lefthook install
 ```
 
-## Customizing
-
-Replace or extend the template files to fit your project:
-
-- **`src/lib.rs`** — Replace with your own library logic.
-- **`src/main.rs`** — Replace or remove the placeholder CLI. Remove this file and the `clap` dependency if your project doesn't need a CLI.
-- **`Cargo.toml`** — Update the package name, description, version, authors, and other metadata.
-- **`CLAUDE.md`** — Replace with guidance specific to your project.
-- **`LICENSE`** — Replace with your preferred license, or keep the [Unlicense](https://unlicense.org/).
-- **`README.md`** — Replace with a description of your project.
-
 ## Development
 
 Write code in `src/`. Unit tests live in a `tests` module alongside the code they cover. Run the test suite with:
@@ -46,6 +33,8 @@ cargo tarpaulin
 ```
 
 The project enforces 100% code coverage on every run.
+
+Game data such as ROMs, savestates, and memory dumps never belongs in this repository. While developing, keep each game in its own folder under `.games/`, which `.gitignore` already excludes, and run the toolkit from inside that folder with `cargo run --`.
 
 Each `git commit` runs the pre-commit hook registered during setup, which checks your changes and fixes what it can in place. If it fails, fix any reported issues, re-stage the changed files, and commit again.
 
