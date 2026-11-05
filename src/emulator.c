@@ -95,3 +95,34 @@ void gbamod_emulator_run_frames(struct gbamod_emulator* emulator, uint32_t frame
 const uint32_t* gbamod_emulator_video(const struct gbamod_emulator* emulator) {
 	return (const uint32_t*) emulator->video;
 }
+
+// Sets the keys pressed while frames run, as a bit mask in the layout of the
+// GBA's key register.
+void gbamod_emulator_set_keys(struct gbamod_emulator* emulator, uint32_t keys) {
+	emulator->core->setKeys(emulator->core, keys);
+}
+
+// Returns the number of frames run since power on.
+uint32_t gbamod_emulator_frame(const struct gbamod_emulator* emulator) {
+	return emulator->core->frameCounter(emulator->core);
+}
+
+// Returns the size of a savestate in bytes.
+size_t gbamod_emulator_state_size(const struct gbamod_emulator* emulator) {
+	return emulator->core->stateSize(emulator->core);
+}
+
+// Writes a savestate of gbamod_emulator_state_size() bytes into `state`.
+// The format is mGBA's raw in-memory savestate, without a PNG wrapper.
+bool gbamod_emulator_save_state(const struct gbamod_emulator* emulator, void* state) {
+	return emulator->core->saveState(emulator->core, state);
+}
+
+// Restores a savestate written by gbamod_emulator_save_state(), returning
+// false if its size is wrong or mGBA rejects it.
+bool gbamod_emulator_load_state(struct gbamod_emulator* emulator, const void* state, size_t size) {
+	if (size != emulator->core->stateSize(emulator->core)) {
+		return false;
+	}
+	return emulator->core->loadState(emulator->core, state);
+}
