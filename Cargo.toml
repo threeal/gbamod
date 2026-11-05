@@ -12,9 +12,14 @@ description = "Emulator-driven toolkit for reverse engineering and patching GBA 
 
 [dependencies]
 clap = "4.6.7"
+png = "0.18.1"
 serde = { version = "1.0.229", features = ["derive"] }
 thiserror = "2.0.21"
 toml = "1.2.0"
+
+[build-dependencies]
+cc = "1.11.0"
+cmake = "0.1.58"
 
 [dev-dependencies]
 tempfile = "3.27.0"
@@ -23,6 +28,8 @@ tempfile = "3.27.0"
 pedantic = "warn"
 nursery = "warn"
 cargo = "warn"
+# `png` depends on two `miniz_oxide` versions, directly and through `flate2`.
+multiple_crate_versions = { level = "allow", priority = 1 }
 
 [lints.rust]
 warnings = "deny"
