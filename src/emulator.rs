@@ -4,8 +4,10 @@
 //! This module needs a real ROM to do anything, so it's excluded from the
 //! coverage check.
 
+use crate::keys::Keys;
 use crate::rom::Rom;
 use crate::screen::{HEIGHT, Screen};
+use crate::session::Machine;
 use std::ffi::c_void;
 use std::ptr::NonNull;
 
@@ -23,6 +25,15 @@ unsafe extern "C" {
     fn gbamod_emulator_free(emulator: *mut RawEmulator);
     fn gbamod_emulator_run_frames(emulator: *mut RawEmulator, frames: u32);
     fn gbamod_emulator_video(emulator: *const RawEmulator) -> *const u32;
+    fn gbamod_emulator_set_keys(emulator: *mut RawEmulator, keys: u32);
+    fn gbamod_emulator_frame(emulator: *const RawEmulator) -> u32;
+    fn gbamod_emulator_state_size(emulator: *const RawEmulator) -> usize;
+    fn gbamod_emulator_save_state(emulator: *const RawEmulator, state: *mut c_void) -> bool;
+    fn gbamod_emulator_load_state(
+        emulator: *mut RawEmulator,
+        state: *const c_void,
+        size: usize,
+    ) -> bool;
 }
 
 /// The reason mGBA couldn't start running a ROM.
@@ -65,6 +76,42 @@ impl Emulator {
             )
         };
         Screen::from_frame_buffer(buffer, VIDEO_STRIDE)
+    }
+}
+
+impl Machine for Emulator {
+    fn set_keys(&mut self, keys: Keys) {
+        // SAFETY: `raw` is a live emulator owned by `self`.
+        unsafe { gbamod_emulator_set_keys(self.raw.as_ptr(), keys.bits().into()) };
+    }
+
+    fn run_frames(&mut self, frames: u32) {
+        Self::run_frames(self, frames);
+    }
+
+    fn frame(&self) -> u32 {
+        // SAFETY: `raw` is a live emulator owned by `self`.
+        unsafe { gbamod_emulator_frame(self.raw.as_ptr()) }
+    }
+
+    fn save_state(&self) -> Vec<u8> {
+        // SAFETY: `raw` is a live emulator owned by `self`, and the buffer is
+        // exactly the size the shim reports for a savestate.
+        unsafe {
+            let mut state = vec![0; gbamod_emulator_state_size(self.raw.as_ptr())];
+            gbamod_emulator_save_state(self.raw.as_ptr(), state.as_mut_ptr().cast());
+            state
+        }
+    }
+
+    fn load_state(&mut self, state: &[u8]) -> bool {
+        // SAFETY: `raw` is a live emulator owned by `self`, and the shim
+        // checks the size before reading `state`.
+        unsafe { gbamod_emulator_load_state(self.raw.as_ptr(), state.as_ptr().cast(), state.len()) }
+    }
+
+    fn screen(&self) -> Screen {
+        Self::screen(self)
     }
 }
 

@@ -14,6 +14,7 @@ description = "Emulator-driven toolkit for reverse engineering and patching GBA 
 clap = "4.6.7"
 png = "0.18.1"
 serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
 thiserror = "2.0.21"
 toml = "1.2.0"
 

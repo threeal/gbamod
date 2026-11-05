@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## About This Repository
 
-gbamod is an emulator-driven Rust library and CLI for reverse engineering and patching GBA games. It's at an early stage: so far it reads a game folder's `gbamod.toml` manifest, validates the ROM it names, and boots it headlessly in mGBA.
+gbamod is an emulator-driven Rust library and CLI for reverse engineering and patching GBA games. It's at an early stage: so far it reads a game folder's `gbamod.toml` manifest, validates the ROM it names, and runs it in mGBA, either once with `boot` or in a background session that later commands drive.
 
 ## Game Data
 
@@ -18,6 +18,10 @@ Why: `.games/` is only a local convenience, and the released binary will run fro
 mGBA 0.10.3 is a git submodule in `third_party/mgba`, built by `build.rs` through CMake. Rust never calls mGBA directly: `src/emulator.c` is a C shim with a flat API, and `src/emulator.rs` binds to that shim. A new emulator capability means adding a shim function, not mirroring mGBA's structs in Rust.
 
 `src/emulator.rs`, and anything in `src/lib.rs` that needs a running emulator, is gated behind `#[cfg(not(tarpaulin_include))]`, since it can't be unit-tested without a real ROM. Keep logic that doesn't need the emulator, like the PNG encoding in `src/screen.rs`, outside that gate so it stays covered.
+
+## Sessions
+
+`gbamod start` relaunches the binary with the hidden `serve` subcommand, which runs the emulator and listens on `.gbamod-session.sock` in the game folder. Every other session command sends it one JSON request and reads one JSON response. Session behavior lives in `src/session.rs` behind the `Machine` trait, so it's tested against a fake machine; only `start`, `serve`, and the emulator's `Machine` implementation are excluded from coverage. A new session command means a new `Request` variant, a `Machine` method if the emulator must do something new, and a CLI subcommand.
 
 ## Manifest Versions
 
