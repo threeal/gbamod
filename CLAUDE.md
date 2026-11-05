@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## About This Repository
 
-gbamod is an emulator-driven Rust library and CLI for reverse engineering and patching GBA games. It's at an early stage: so far it reads a game folder's `gbamod.toml` manifest and validates the ROM it names.
+gbamod is an emulator-driven Rust library and CLI for reverse engineering and patching GBA games. It's at an early stage: so far it reads a game folder's `gbamod.toml` manifest, validates the ROM it names, and boots it headlessly in mGBA.
 
 ## Game Data
 
@@ -12,6 +12,12 @@ Never commit game data — ROMs, savestates, memory dumps, screenshots, notes, h
 
 During development, each game lives in its own folder under `.games/<game>/`, ignored by git, and the toolkit runs from inside it with `cargo run --`. The toolkit must never assume `.games/` exists; it works from the current directory or from paths it's given.
 Why: `.games/` is only a local convenience, and the released binary will run from game folders anywhere.
+
+## Emulator
+
+mGBA 0.10.3 is a git submodule in `third_party/mgba`, built by `build.rs` through CMake. Rust never calls mGBA directly: `src/emulator.c` is a C shim with a flat API, and `src/emulator.rs` binds to that shim. A new emulator capability means adding a shim function, not mirroring mGBA's structs in Rust.
+
+`src/emulator.rs`, and anything in `src/lib.rs` that needs a running emulator, is gated behind `#[cfg(not(tarpaulin_include))]`, since it can't be unit-tested without a real ROM. Keep logic that doesn't need the emulator, like the PNG encoding in `src/screen.rs`, outside that gate so it stays covered.
 
 ## Manifest Versions
 

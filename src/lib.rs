@@ -1,8 +1,11 @@
 //! An emulator-driven toolkit for reverse engineering and patching GBA games.
 
+#[cfg(not(tarpaulin_include))]
+pub mod emulator;
 pub mod game;
 pub mod manifest;
 pub mod rom;
+pub mod screen;
 
 use game::{Game, GameError};
 use std::path::Path;
@@ -25,6 +28,51 @@ pub fn info(dir: &Path) -> Result<String, GameError> {
         header.maker_code,
         header.version,
         rom.bytes.len(),
+    ))
+}
+
+/// The reason the `boot` command failed.
+#[cfg(not(tarpaulin_include))]
+#[derive(Debug, thiserror::Error)]
+pub enum BootError {
+    /// The game folder or its ROM couldn't be read.
+    #[error(transparent)]
+    Game(#[from] GameError),
+    /// The emulator couldn't load the ROM.
+    #[error(transparent)]
+    Load(#[from] emulator::LoadError),
+    /// The screenshot couldn't be written.
+    #[error("failed to write `{}`: {source}", path.display())]
+    Write {
+        /// The screenshot file.
+        path: std::path::PathBuf,
+        /// The underlying I/O error.
+        source: std::io::Error,
+    },
+}
+
+/// Boots the ROM of the game folder at `dir` with no window, runs it for
+/// `frames` frames, and saves the screen as a PNG at `screenshot`, for the
+/// `boot` command.
+///
+/// # Errors
+///
+/// Returns a [`BootError`] if the game folder or its ROM can't be read, the
+/// emulator can't load the ROM, or the screenshot can't be written.
+#[cfg(not(tarpaulin_include))]
+pub fn boot(dir: &Path, frames: u32, screenshot: &Path) -> Result<String, BootError> {
+    let rom = Game::open(dir)?.read_rom()?;
+    let mut emulator = emulator::Emulator::new(&rom)?;
+    emulator.run_frames(frames);
+    std::fs::write(screenshot, emulator.screen().encode_png()).map_err(|source| {
+        BootError::Write {
+            path: screenshot.to_path_buf(),
+            source,
+        }
+    })?;
+    Ok(format!(
+        "Ran {frames} frames and saved the screen to {}",
+        screenshot.display()
     ))
 }
 
