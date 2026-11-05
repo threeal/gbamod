@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## About This Repository
 
-gbamod is an emulator-driven Rust library and CLI for reverse engineering and patching GBA games. It isn't implemented yet: `src/` holds only a placeholder `status` function and a CLI that prints it.
+gbamod is an emulator-driven Rust library and CLI for reverse engineering and patching GBA games. It's at an early stage: so far it reads a game folder's `gbamod.toml` manifest and validates the ROM it names.
 
 ## Game Data
 
@@ -12,6 +12,10 @@ Never commit game data — ROMs, savestates, memory dumps, screenshots, notes, h
 
 During development, each game lives in its own folder under `.games/<game>/`, ignored by git, and the toolkit runs from inside it with `cargo run --`. The toolkit must never assume `.games/` exists; it works from the current directory or from paths it's given.
 Why: `.games/` is only a local convenience, and the released binary will run from game folders anywhere.
+
+## Manifest Versions
+
+`gbamod.toml` carries a `version` field. `Manifest::parse` dispatches on it with one layout struct per version, so a layout change adds a new version and case rather than editing an existing one, and older manifests keep parsing.
 
 ## Gotchas
 

@@ -2,7 +2,22 @@
 
 An emulator-driven toolkit for reverse engineering and patching [GBA](https://en.wikipedia.org/wiki/Game_Boy_Advance) games. It drives an emulator headlessly to dump and diff memory, set watchpoints and breakpoints, and assemble hooks into [IPS](https://zerosoft.zophar.net/ips.php) patches.
 
-This project is at an early stage: the toolkit isn't implemented yet, and its CLI only prints a placeholder notice.
+This project is at an early stage: so far it can only read a game folder and check its ROM.
+
+## Usage
+
+gbamod runs from inside a game folder, a directory holding a `gbamod.toml` manifest that names the game's ROM:
+
+```toml
+version = 1
+rom = "roms/game.gba"
+```
+
+Print what the ROM's header says, after checking that it's a valid GBA ROM:
+
+```sh
+gbamod info
+```
 
 ## Setup
 
