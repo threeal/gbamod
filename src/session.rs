@@ -5,6 +5,7 @@
 //! line of JSON, and reads back one line holding the result.
 
 use crate::keys::Keys;
+use crate::memory::{self, Width};
 use crate::screen::Screen;
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -59,8 +60,33 @@ pub enum Request {
         /// The PNG file.
         path: PathBuf,
     },
+    /// Reads bytes from memory.
+    Peek {
+        /// The address of the first byte.
+        address: u32,
+        /// The number of bytes to read.
+        count: u32,
+    },
+    /// Writes a value to memory.
+    Poke(Poke),
+    /// Writes all working RAM to a file, laid out as [`memory::RAM_REGIONS`].
+    Dump {
+        /// The dump file.
+        path: PathBuf,
+    },
     /// Ends the session.
     Stop,
+}
+
+/// A value to write to memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Poke {
+    /// The address to write to.
+    pub address: u32,
+    /// The width of the value.
+    pub width: Width,
+    /// The value, which must fit in `width`.
+    pub value: u32,
 }
 
 /// The emulator operations a session needs.
@@ -78,6 +104,12 @@ pub trait Machine {
     fn load_state(&mut self, state: &[u8]) -> bool;
     /// Captures the last frame drawn to the screen.
     fn screen(&self) -> Screen;
+    /// Reads the byte at `address`, without the side effects a game's own
+    /// read could have.
+    fn read_byte(&self, address: u32) -> u8;
+    /// Writes `value` at `address` with the given width, without the side
+    /// effects a game's own write could have.
+    fn write(&mut self, address: u32, width: Width, value: u32);
 }
 
 /// The state of a session: its machine and the keys held between commands.
@@ -148,8 +180,42 @@ impl<M: Machine> Session<M> {
                 write(path, &self.machine.screen().encode_png())?;
                 Ok(format!("Saved the screen to {}", path.display()))
             }
+            Request::Peek { address, count } => {
+                let bytes: Vec<u8> = (0..*count)
+                    .map(|offset| self.machine.read_byte(address.wrapping_add(offset)))
+                    .collect();
+                Ok(memory::hex_dump(*address, &bytes))
+            }
+            Request::Poke(poke) => self.poke(*poke),
+            Request::Dump { path } => {
+                let bytes: Vec<u8> = memory::RAM_REGIONS
+                    .iter()
+                    .flat_map(|region| region.start..region.start + region.size)
+                    .map(|address| self.machine.read_byte(address))
+                    .collect();
+                write(path, &bytes)?;
+                Ok(format!(
+                    "Saved {} bytes of RAM to {}",
+                    bytes.len(),
+                    path.display()
+                ))
+            }
             Request::Stop => Ok("Stopped the session".to_string()),
         }
+    }
+
+    /// Writes a poke's value to memory if it fits in its width.
+    fn poke(&mut self, poke: Poke) -> Result<String, String> {
+        let value = poke
+            .width
+            .check(poke.value)
+            .map_err(|err| err.to_string())?;
+        self.machine.write(poke.address, poke.width, value);
+        Ok(format!(
+            "Wrote {} to 0x{:08X}",
+            poke.width.format(value),
+            poke.address
+        ))
     }
 }
 
@@ -239,6 +305,7 @@ mod tests {
         keys: Vec<(Keys, u32)>,
         current_keys: Keys,
         state: Vec<u8>,
+        memory: std::collections::HashMap<u32, u8>,
     }
 
     impl Machine for FakeMachine {
@@ -270,6 +337,20 @@ mod tests {
 
         fn screen(&self) -> Screen {
             Screen::from_frame_buffer(&vec![0x00FF_0000; WIDTH * HEIGHT], WIDTH)
+        }
+
+        /// Reads the written byte, or the address's low byte if none was.
+        fn read_byte(&self, address: u32) -> u8 {
+            self.memory
+                .get(&address)
+                .copied()
+                .unwrap_or_else(|| address.to_le_bytes()[0])
+        }
+
+        fn write(&mut self, address: u32, width: Width, value: u32) {
+            for (offset, byte) in (0..width.bytes()).zip(value.to_le_bytes()) {
+                self.memory.insert(address + offset, byte);
+            }
         }
     }
 
@@ -387,6 +468,88 @@ mod tests {
     }
 
     #[test]
+    fn peek_memory() {
+        let mut session = Session::new(FakeMachine::default());
+        assert_eq!(
+            session.handle(&Request::Peek {
+                address: 0x0200_00FE,
+                count: 4
+            }),
+            Ok("020000FE: FE FF 00 01".into())
+        );
+    }
+
+    #[test]
+    fn poke_memory() {
+        let mut session = Session::new(FakeMachine::default());
+        for (width, value, message) in [
+            (Width::U8, 0xAA, "Wrote 0xAA to 0x02000000"),
+            (Width::U16, 0xBBCC, "Wrote 0xBBCC to 0x02000000"),
+            (Width::U32, 0x1122_3344, "Wrote 0x11223344 to 0x02000000"),
+        ] {
+            assert_eq!(
+                session.handle(&Request::Poke(Poke {
+                    address: 0x0200_0000,
+                    width,
+                    value
+                })),
+                Ok(message.into())
+            );
+        }
+        assert_eq!(
+            session.handle(&Request::Peek {
+                address: 0x0200_0000,
+                count: 4
+            }),
+            Ok("02000000: 44 33 22 11".into())
+        );
+    }
+
+    #[test]
+    fn reject_too_wide_poke() {
+        let mut session = Session::new(FakeMachine::default());
+        assert_eq!(
+            session.handle(&Request::Poke(Poke {
+                address: 0x0200_0000,
+                width: Width::U8,
+                value: 0x100
+            })),
+            Err("value 0x100 doesn't fit in 8 bits".into())
+        );
+        assert!(session.machine.memory.is_empty());
+    }
+
+    #[test]
+    fn dump_ram() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ram.bin");
+        let mut session = Session::new(FakeMachine::default());
+        session.machine.write(0x0300_0010, Width::U8, 0x5A);
+
+        assert_eq!(
+            session.handle(&Request::Dump { path: path.clone() }),
+            Ok(format!("Saved 294912 bytes of RAM to {}", path.display()))
+        );
+        let dump = fs::read(&path).unwrap();
+        assert_eq!(dump.len(), 0x4_8000);
+        assert_eq!(dump[0x01], 0x01);
+        assert_eq!(dump[0x4_0010], 0x5A);
+    }
+
+    #[test]
+    fn reject_unwritable_dump() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = Session::new(FakeMachine::default());
+        assert!(
+            session
+                .handle(&Request::Dump {
+                    path: dir.path().join("missing/ram.bin")
+                })
+                .is_err()
+        );
+    }
+
+    #[test]
     fn stop_session() {
         let mut session = Session::new(FakeMachine::default());
         assert_eq!(
@@ -484,6 +647,18 @@ mod tests {
                 .starts_with("the session sent an invalid response: ")
         );
         server.join().unwrap();
+    }
+
+    #[test]
+    fn encode_poke_request() {
+        assert_eq!(
+            encode(&Request::Poke(Poke {
+                address: 16,
+                width: Width::U16,
+                value: 288
+            })),
+            r#"{"command":"poke","address":16,"width":"u16","value":288}"#
+        );
     }
 
     #[test]

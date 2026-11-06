@@ -126,3 +126,24 @@ bool gbamod_emulator_load_state(struct gbamod_emulator* emulator, const void* st
 	}
 	return emulator->core->loadState(emulator->core, state);
 }
+
+// Reads the byte at `address`, bypassing the side effects of a bus read.
+uint8_t gbamod_emulator_read8(const struct gbamod_emulator* emulator, uint32_t address) {
+	return emulator->core->rawRead8(emulator->core, address, -1);
+}
+
+// Writes `value` at `address` with a width of 1, 2, or 4 bytes, bypassing the
+// side effects of a bus write.
+void gbamod_emulator_write(struct gbamod_emulator* emulator, uint32_t address, uint32_t width, uint32_t value) {
+	switch (width) {
+	case 1:
+		emulator->core->rawWrite8(emulator->core, address, -1, value);
+		break;
+	case 2:
+		emulator->core->rawWrite16(emulator->core, address, -1, value);
+		break;
+	case 4:
+		emulator->core->rawWrite32(emulator->core, address, -1, value);
+		break;
+	}
+}
