@@ -2,7 +2,7 @@
 
 An emulator-driven toolkit for reverse engineering and patching [GBA](https://en.wikipedia.org/wiki/Game_Boy_Advance) games. It drives an emulator headlessly to dump and diff memory, set watchpoints and breakpoints, and assemble hooks into [IPS](https://zerosoft.zophar.net/ips.php) patches.
 
-This project is at an early stage: so far it can read a game folder, check its ROM, and play it in the emulator through a background session, with savestates and screenshots.
+This project is at an early stage: so far it can read a game folder, check its ROM, and play it in the emulator through a background session, with savestates, screenshots, and memory access.
 
 ## Usage
 
@@ -37,6 +37,16 @@ gbamod load title.st   # restore a savestate
 gbamod shot title.png  # save the screen as a PNG
 gbamod stop
 ```
+
+While a session runs, read and write its memory. Addresses and values are decimal, or hex with a `0x` prefix:
+
+```sh
+gbamod peek 0x02000000 32         # print bytes as hex, 16 by default
+gbamod poke16 0x02000010 0x0120   # write a value; also poke8 and poke32
+gbamod dump ram.bin               # write all working RAM to a file
+```
+
+A dump holds the 256 KiB EWRAM from `0x02000000`, followed by the 32 KiB IWRAM from `0x03000000`, so a file offset below `0x40000` is that offset into EWRAM and anything from there on is IWRAM.
 
 ## Setup
 

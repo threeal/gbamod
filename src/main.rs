@@ -6,7 +6,8 @@
 mod cli {
     use clap::{Arg, ArgMatches, Command, arg, value_parser};
     use gbamod::keys::Keys;
-    use gbamod::session::{self, Request};
+    use gbamod::memory::{self, Width};
+    use gbamod::session::{self, Poke, Request};
     use std::path::{Path, PathBuf};
 
     /// Defines the command line.
@@ -65,6 +66,24 @@ mod cli {
                     .about("Save the session's screen as a PNG")
                     .arg(file_arg("The PNG file to write")),
             )
+            .subcommand(
+                Command::new("peek")
+                    .about("Print bytes from the session's memory as hex")
+                    .arg(number_arg("address", "The address of the first byte"))
+                    .arg(
+                        Arg::new("count")
+                            .help("The number of bytes to print [default: 16]")
+                            .value_parser(memory::parse_number),
+                    ),
+            )
+            .subcommand(poke_command("poke8", "byte"))
+            .subcommand(poke_command("poke16", "16-bit halfword"))
+            .subcommand(poke_command("poke32", "32-bit word"))
+            .subcommand(
+                Command::new("dump")
+                    .about("Write the session's working RAM to a file, EWRAM then IWRAM")
+                    .arg(file_arg("The dump file to write")),
+            )
             .subcommand(Command::new(gbamod::SERVE_COMMAND).hide(true))
     }
 
@@ -99,8 +118,50 @@ mod cli {
             Some(("save", args)) => request(Request::Save { path: file(args) }),
             Some(("load", args)) => request(Request::Load { path: file(args) }),
             Some(("shot", args)) => request(Request::Shot { path: file(args) }),
+            Some(("peek", args)) => request(Request::Peek {
+                address: number(args, "address"),
+                count: args
+                    .get_one::<u32>("count")
+                    .copied()
+                    .unwrap_or(memory::DEFAULT_PEEK_COUNT),
+            }),
+            Some(("poke8", args)) => poke(args, Width::U8).and_then(request),
+            Some(("poke16", args)) => poke(args, Width::U16).and_then(request),
+            Some(("poke32", args)) => poke(args, Width::U32).and_then(request),
+            Some(("dump", args)) => request(Request::Dump { path: file(args) }),
             _ => unreachable!("clap requires a known subcommand"),
         }
+    }
+
+    fn number_arg(name: &'static str, help: &'static str) -> Arg {
+        Arg::new(name)
+            .required(true)
+            .help(help)
+            .value_parser(memory::parse_number)
+    }
+
+    fn poke_command(name: &'static str, value: &str) -> Command {
+        Command::new(name)
+            .about(format!("Write a {value} to the session's memory"))
+            .arg(number_arg("address", "The address to write to"))
+            .arg(number_arg("value", "The value to write"))
+    }
+
+    fn number(args: &ArgMatches, name: &str) -> u32 {
+        args.get_one::<u32>(name).copied().unwrap_or_default()
+    }
+
+    /// Builds a poke request, rejecting a value too wide for `width` before
+    /// it reaches the session.
+    fn poke(args: &ArgMatches, width: Width) -> Result<Request, String> {
+        let value = width
+            .check(number(args, "value"))
+            .map_err(|err| err.to_string())?;
+        Ok(Request::Poke(Poke {
+            address: number(args, "address"),
+            width,
+            value,
+        }))
     }
 
     fn frames_arg() -> Arg {

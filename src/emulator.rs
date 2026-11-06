@@ -5,6 +5,7 @@
 //! coverage check.
 
 use crate::keys::Keys;
+use crate::memory::Width;
 use crate::rom::Rom;
 use crate::screen::{HEIGHT, Screen};
 use crate::session::Machine;
@@ -29,6 +30,8 @@ unsafe extern "C" {
     fn gbamod_emulator_frame(emulator: *const RawEmulator) -> u32;
     fn gbamod_emulator_state_size(emulator: *const RawEmulator) -> usize;
     fn gbamod_emulator_save_state(emulator: *const RawEmulator, state: *mut c_void) -> bool;
+    fn gbamod_emulator_read8(emulator: *const RawEmulator, address: u32) -> u8;
+    fn gbamod_emulator_write(emulator: *mut RawEmulator, address: u32, width: u32, value: u32);
     fn gbamod_emulator_load_state(
         emulator: *mut RawEmulator,
         state: *const c_void,
@@ -112,6 +115,16 @@ impl Machine for Emulator {
 
     fn screen(&self) -> Screen {
         Self::screen(self)
+    }
+
+    fn read_byte(&self, address: u32) -> u8 {
+        // SAFETY: `raw` is a live emulator owned by `self`.
+        unsafe { gbamod_emulator_read8(self.raw.as_ptr(), address) }
+    }
+
+    fn write(&mut self, address: u32, width: Width, value: u32) {
+        // SAFETY: `raw` is a live emulator owned by `self`.
+        unsafe { gbamod_emulator_write(self.raw.as_ptr(), address, width.bytes(), value) };
     }
 }
 
