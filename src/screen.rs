@@ -6,6 +6,25 @@ pub const WIDTH: usize = 240;
 /// The height of the GBA screen in pixels.
 pub const HEIGHT: usize = 160;
 
+/// The reason a PNG image can't be read as a frame of the screen.
+#[derive(Debug, thiserror::Error)]
+pub enum ScreenError {
+    /// The data isn't a valid PNG image.
+    #[error("not a valid PNG image: {0}")]
+    Decode(#[from] png::DecodingError),
+    /// The image isn't the size of the screen.
+    #[error("the image is {width}x{height}, but the screen is 240x160")]
+    Size {
+        /// The image's width in pixels.
+        width: u32,
+        /// The image's height in pixels.
+        height: u32,
+    },
+    /// The image has no color channels.
+    #[error("the image is grayscale, but a screenshot is in color")]
+    Grayscale,
+}
+
 /// One frame of the GBA screen, as 8-bit RGB pixels in row-major order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Screen {
@@ -53,6 +72,35 @@ impl Screen {
         assert!(x < WIDTH && y < HEIGHT, "({x}, {y}) is outside the screen");
         let offset = (y * WIDTH + x) * 3;
         [self.rgb[offset], self.rgb[offset + 1], self.rgb[offset + 2]]
+    }
+
+    /// Decodes a frame from a 240x160 PNG image in color, such as one saved
+    /// by [`Screen::encode_png`], dropping any alpha channel.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ScreenError`] if the data isn't a valid PNG image, or the
+    /// image isn't 240x160 or is grayscale.
+    pub fn decode_png(png: &[u8]) -> Result<Self, ScreenError> {
+        let mut decoder = png::Decoder::new(std::io::Cursor::new(png));
+        decoder.set_transformations(png::Transformations::normalize_to_color8());
+        let mut reader = decoder.read_info()?;
+        let (width, height) = (reader.info().width, reader.info().height);
+        if (width as usize, height as usize) != (WIDTH, HEIGHT) {
+            return Err(ScreenError::Size { width, height });
+        }
+        let channels = match reader.output_color_type().0 {
+            png::ColorType::Rgb => 3,
+            png::ColorType::Rgba => 4,
+            _ => return Err(ScreenError::Grayscale),
+        };
+        let mut buffer = vec![0; reader.output_buffer_size().unwrap_or_default()];
+        reader.next_frame(&mut buffer)?;
+        let rgb = buffer
+            .chunks_exact(channels)
+            .flat_map(|pixel| [pixel[0], pixel[1], pixel[2]])
+            .collect();
+        Ok(Self { rgb })
     }
 
     /// Encodes the frame as an 8-bit RGB PNG image.
@@ -143,5 +191,72 @@ mod tests {
         assert_eq!((info.width, info.height), (240, 160));
         assert_eq!(info.color_type, png::ColorType::Rgb);
         assert_eq!(rgb, screen.rgb);
+    }
+
+    /// Encodes `data` as a PNG image of the given size and color type.
+    fn png_image(width: u32, height: u32, color: png::ColorType, data: &[u8]) -> Vec<u8> {
+        let mut png = Vec::new();
+        let mut encoder = png::Encoder::new(&mut png, width, height);
+        encoder.set_color(color);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .write_header()
+            .unwrap()
+            .write_image_data(data)
+            .unwrap();
+        png
+    }
+
+    #[test]
+    fn decode_encoded_png() {
+        let screen = Screen::from_frame_buffer(&frame_buffer(256), 256);
+        assert_eq!(Screen::decode_png(&screen.encode_png()).unwrap(), screen);
+    }
+
+    #[test]
+    fn decode_png_with_alpha() {
+        let rgba: Vec<u8> = [1, 2, 3, 255].repeat(WIDTH * HEIGHT);
+        let png = png_image(240, 160, png::ColorType::Rgba, &rgba);
+        let screen = Screen::decode_png(&png).unwrap();
+        assert_eq!(screen.pixel(0, 0), [1, 2, 3]);
+        assert_eq!(screen.pixel(239, 159), [1, 2, 3]);
+    }
+
+    #[test]
+    fn reject_invalid_png() {
+        let err = Screen::decode_png(b"not a png").unwrap_err();
+        assert!(matches!(err, ScreenError::Decode(_)));
+        assert!(err.to_string().starts_with("not a valid PNG image: "));
+    }
+
+    #[test]
+    fn reject_png_of_wrong_size() {
+        let png = png_image(2, 1, png::ColorType::Rgb, &[0; 6]);
+        assert_eq!(
+            Screen::decode_png(&png).unwrap_err().to_string(),
+            "the image is 2x1, but the screen is 240x160"
+        );
+    }
+
+    #[test]
+    fn reject_grayscale_png() {
+        let png = png_image(
+            240,
+            160,
+            png::ColorType::Grayscale,
+            &vec![0; WIDTH * HEIGHT],
+        );
+        assert_eq!(
+            Screen::decode_png(&png).unwrap_err().to_string(),
+            "the image is grayscale, but a screenshot is in color"
+        );
+    }
+
+    #[test]
+    fn reject_truncated_png() {
+        let screen = Screen::from_frame_buffer(&frame_buffer(256), 256);
+        let png = screen.encode_png();
+        let err = Screen::decode_png(&png[..png.len() - 20]).unwrap_err();
+        assert!(matches!(err, ScreenError::Decode(_)));
     }
 }

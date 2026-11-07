@@ -6,6 +6,7 @@ pub mod game;
 pub mod keys;
 pub mod manifest;
 pub mod memory;
+pub mod pixels;
 pub mod rom;
 pub mod screen;
 pub mod search;
