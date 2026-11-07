@@ -4,6 +4,7 @@
 //! [`SOCKET_NAME`] there. Each command connects, sends one [`Request`] as a
 //! line of JSON, and reads back one line holding the result.
 
+use crate::debug::{self, Hits, Point, PointKind, Registers, WatchKind};
 use crate::keys::Keys;
 use crate::memory::{self, Width};
 use crate::screen::Screen;
@@ -74,6 +75,26 @@ pub enum Request {
         /// The dump file.
         path: PathBuf,
     },
+    /// Adds a watchpoint, whose hits later commands list.
+    Watch {
+        /// The address to watch.
+        address: u32,
+        /// The accesses that fire it.
+        on: WatchKind,
+    },
+    /// Adds a breakpoint, whose hits later commands list.
+    Break {
+        /// The address of the instruction to break on.
+        address: u32,
+        /// The number of stack words to show for each hit.
+        stack: u32,
+    },
+    /// Lists the watchpoints and breakpoints.
+    Points,
+    /// Removes every watchpoint and breakpoint.
+    Clear,
+    /// Prints the CPU registers.
+    Regs,
     /// Ends the session.
     Stop,
 }
@@ -110,12 +131,24 @@ pub trait Machine {
     /// Writes `value` at `address` with the given width, without the side
     /// effects a game's own write could have.
     fn write(&mut self, address: u32, width: Width, value: u32);
+    /// Adds a watchpoint on `address`, returning its id.
+    fn add_watchpoint(&mut self, address: u32, kind: WatchKind) -> i64;
+    /// Adds a breakpoint on the instruction at `address`, returning its id.
+    fn add_breakpoint(&mut self, address: u32) -> i64;
+    /// Removes the watchpoint or breakpoint with the given id.
+    fn clear_point(&mut self, id: i64);
+    /// Returns the hits recorded since the last call, and forgets them.
+    fn take_hits(&mut self) -> Hits;
+    /// Returns the CPU registers, where `pc` is the next instruction to run.
+    fn registers(&self) -> Registers;
 }
 
-/// The state of a session: its machine and the keys held between commands.
+/// The state of a session: its machine, and the keys held and points set
+/// between commands.
 pub struct Session<M> {
     machine: M,
     held: Keys,
+    points: Vec<Point>,
 }
 
 impl<M: Machine> Session<M> {
@@ -124,6 +157,7 @@ impl<M: Machine> Session<M> {
         Self {
             machine,
             held: Keys::NONE,
+            points: Vec::new(),
         }
     }
 
@@ -138,10 +172,10 @@ impl<M: Machine> Session<M> {
             Request::Run { frames } => {
                 self.machine.set_keys(self.held);
                 self.machine.run_frames(*frames);
-                Ok(format!(
+                Ok(self.with_hits(format!(
                     "Ran {frames} frames, now at frame {}",
                     self.machine.frame()
-                ))
+                )))
             }
             Request::Hold { keys } => {
                 self.held = *keys;
@@ -152,10 +186,10 @@ impl<M: Machine> Session<M> {
                 self.machine.run_frames(*frames);
                 self.machine.set_keys(self.held);
                 self.machine.run_frames(TAP_RELEASE_FRAMES);
-                Ok(format!(
+                Ok(self.with_hits(format!(
                     "Tapped {keys} for {frames} frames, now at frame {}",
                     self.machine.frame()
-                ))
+                )))
             }
             Request::Save { path } => {
                 write(path, &self.machine.save_state())?;
@@ -198,8 +232,62 @@ impl<M: Machine> Session<M> {
                     path.display()
                 ))
             }
+            Request::Watch { address, on } => {
+                let id = self.machine.add_watchpoint(*address, *on);
+                Ok(self.add_point(id, *address, PointKind::Watch(*on)))
+            }
+            Request::Break { address, stack } => {
+                if *stack > debug::MAX_STACK_WORDS {
+                    return Err(format!(
+                        "a breakpoint shows at most {} stack words",
+                        debug::MAX_STACK_WORDS
+                    ));
+                }
+                let id = self.machine.add_breakpoint(*address);
+                Ok(self.add_point(id, *address, PointKind::Break { stack: *stack }))
+            }
+            Request::Points => Ok(self.list_points()),
+            Request::Clear => {
+                for point in &self.points {
+                    self.machine.clear_point(point.id);
+                }
+                let count = self.points.len();
+                self.points.clear();
+                Ok(format!("Cleared {count} points"))
+            }
+            Request::Regs => Ok(self.machine.registers().to_string()),
             Request::Stop => Ok("Stopped the session".to_string()),
         }
+    }
+
+    /// Appends the hits recorded since the last command to `message`, if any
+    /// points are set.
+    fn with_hits(&mut self, message: String) -> String {
+        let hits = self.machine.take_hits();
+        if self.points.is_empty() {
+            return message;
+        }
+        format!("{message}\n{}", debug::report(&hits, &self.points))
+    }
+
+    /// Remembers a point the machine added, describing it.
+    fn add_point(&mut self, id: i64, address: u32, kind: PointKind) -> String {
+        let point = Point { id, address, kind };
+        self.points.push(point);
+        format!("Point {id}: {point}")
+    }
+
+    /// Lists the points with their ids, one per line.
+    fn list_points(&self) -> String {
+        if self.points.is_empty() {
+            return "No points".to_string();
+        }
+        let lines: Vec<String> = self
+            .points
+            .iter()
+            .map(|point| format!("Point {}: {point}", point.id))
+            .collect();
+        lines.join("\n")
     }
 
     /// Writes a poke's value to memory if it fits in its width.
@@ -304,6 +392,9 @@ mod tests {
         current_keys: Keys,
         state: Vec<u8>,
         memory: std::collections::HashMap<u32, u8>,
+        points: Vec<i64>,
+        next_point: i64,
+        hits: Hits,
     }
 
     impl Machine for FakeMachine {
@@ -349,6 +440,34 @@ mod tests {
             for (offset, byte) in (0..width.bytes()).zip(value.to_le_bytes()) {
                 self.memory.insert(address + offset, byte);
             }
+        }
+
+        fn add_watchpoint(&mut self, _address: u32, _kind: WatchKind) -> i64 {
+            self.add_point()
+        }
+
+        fn add_breakpoint(&mut self, _address: u32) -> i64 {
+            self.add_point()
+        }
+
+        fn clear_point(&mut self, id: i64) {
+            self.points.retain(|&point| point != id);
+        }
+
+        fn take_hits(&mut self) -> Hits {
+            std::mem::take(&mut self.hits)
+        }
+
+        fn registers(&self) -> Registers {
+            debug::tests::registers()
+        }
+    }
+
+    impl FakeMachine {
+        fn add_point(&mut self) -> i64 {
+            self.next_point += 1;
+            self.points.push(self.next_point);
+            self.next_point
         }
     }
 
@@ -548,6 +667,94 @@ mod tests {
     }
 
     #[test]
+    fn add_and_clear_points() {
+        let mut session = Session::new(FakeMachine::default());
+        assert_eq!(session.handle(&Request::Points), Ok("No points".into()));
+        assert_eq!(
+            session.handle(&Request::Watch {
+                address: 0x0200_316C,
+                on: WatchKind::Write
+            }),
+            Ok("Point 1: watching writes to 0x0200316C".into())
+        );
+        assert_eq!(
+            session.handle(&Request::Break {
+                address: 0x0804_FD08,
+                stack: 48
+            }),
+            Ok("Point 2: breaking at 0x0804FD08 with 48 stack words".into())
+        );
+        assert_eq!(
+            session.handle(&Request::Points),
+            Ok("Point 1: watching writes to 0x0200316C\n\
+                Point 2: breaking at 0x0804FD08 with 48 stack words"
+                .into())
+        );
+        assert_eq!(session.machine.points, [1, 2]);
+
+        assert_eq!(
+            session.handle(&Request::Clear),
+            Ok("Cleared 2 points".into())
+        );
+        assert_eq!(session.handle(&Request::Points), Ok("No points".into()));
+        assert_eq!(session.machine.points.len(), 0);
+    }
+
+    #[test]
+    fn reject_too_many_stack_words() {
+        let mut session = Session::new(FakeMachine::default());
+        assert_eq!(
+            session.handle(&Request::Break {
+                address: 0x0804_FD08,
+                stack: 65
+            }),
+            Err("a breakpoint shows at most 64 stack words".into())
+        );
+        assert_eq!(session.machine.points.len(), 0);
+    }
+
+    #[test]
+    fn list_hits_after_running() {
+        let mut session = Session::new(FakeMachine::default());
+        session.machine.hits.total = 3;
+        assert_eq!(
+            session.handle(&Request::Run { frames: 1 }),
+            Ok("Ran 1 frames, now at frame 1".into())
+        );
+
+        session
+            .handle(&Request::Watch {
+                address: 0x0200_316C,
+                on: WatchKind::Change,
+            })
+            .unwrap();
+        assert_eq!(
+            session.handle(&Request::Run { frames: 1 }),
+            Ok("Ran 1 frames, now at frame 2\nNo hits".into())
+        );
+        session.machine.hits.total = 3;
+        assert_eq!(
+            session.handle(&Request::Tap {
+                keys: keys("A"),
+                frames: 1
+            }),
+            Ok(format!(
+                "Tapped A for 1 frames, now at frame {}\n3 hits, listing the first 0",
+                3 + TAP_RELEASE_FRAMES
+            ))
+        );
+    }
+
+    #[test]
+    fn print_registers() {
+        let mut session = Session::new(FakeMachine::default());
+        assert_eq!(
+            session.handle(&Request::Regs),
+            Ok(debug::tests::registers().to_string())
+        );
+    }
+
+    #[test]
     fn stop_session() {
         let mut session = Session::new(FakeMachine::default());
         assert_eq!(
@@ -656,6 +863,24 @@ mod tests {
                 value: 288
             })),
             r#"{"command":"poke","address":16,"width":"u16","value":288}"#
+        );
+    }
+
+    #[test]
+    fn encode_debugger_requests() {
+        assert_eq!(
+            encode(&Request::Watch {
+                address: 16,
+                on: WatchKind::Access
+            }),
+            r#"{"command":"watch","address":16,"on":"access"}"#
+        );
+        assert_eq!(
+            encode(&Request::Break {
+                address: 16,
+                stack: 0
+            }),
+            r#"{"command":"break","address":16,"stack":0}"#
         );
     }
 

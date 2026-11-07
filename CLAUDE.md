@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## About This Repository
 
-gbamod is an emulator-driven Rust library and CLI for reverse engineering and patching GBA games. It's at an early stage: so far it reads a game folder's `gbamod.toml` manifest, validates the ROM it names, and runs it in mGBA, either once with `boot` or in a background session that later commands drive, including reading, writing, and dumping its memory, and searches those dumps for values. It also reads pixels from screenshots.
+gbamod is an emulator-driven Rust library and CLI for reverse engineering and patching GBA games. It's at an early stage: so far it reads a game folder's `gbamod.toml` manifest, validates the ROM it names, and runs it in mGBA, either once with `boot` or in a background session that later commands drive, including reading, writing, and dumping its memory and watching it with mGBA's debugger. It also searches memory dumps for values and reads pixels from screenshots.
 
 ## Game Data
 
@@ -15,7 +15,7 @@ Why: `.games/` is only a local convenience, and the released binary will run fro
 
 ## Emulator
 
-mGBA 0.10.3 is a git submodule in `third_party/mgba`, built by `build.rs` through CMake. Rust never calls mGBA directly: `src/emulator.c` is a C shim with a flat API, and `src/emulator.rs` binds to that shim. A new emulator capability means adding a shim function, not mirroring mGBA's structs in Rust.
+mGBA 0.10.3 is a git submodule in `third_party/mgba`, built by `build.rs` through CMake. Rust never calls mGBA directly: `src/emulator.c` is a C shim with a flat API, and `src/emulator.rs` binds to that shim. A new emulator capability means adding a shim function, not mirroring mGBA's structs in Rust. A struct the shim hands to Rust, like `struct gbamod_hit`, is mirrored field for field by a `#[repr(C)]` struct in `src/emulator.rs`, so a change to one needs the same change to the other.
 
 `src/emulator.rs`, and anything in `src/lib.rs` that needs a running emulator, is gated behind `#[cfg(not(tarpaulin_include))]`, since it can't be unit-tested without a real ROM. Keep logic that doesn't need the emulator, like the PNG encoding in `src/screen.rs`, outside that gate so it stays covered.
 

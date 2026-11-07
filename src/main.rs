@@ -5,6 +5,7 @@
 #[cfg(not(tarpaulin_include))]
 mod cli {
     use clap::{Arg, ArgMatches, Command, arg, value_parser};
+    use gbamod::debug::{self, WatchKind};
     use gbamod::keys::Keys;
     use gbamod::memory::{self, Width};
     use gbamod::pixels::{self, Area, Token};
@@ -88,6 +89,7 @@ mod cli {
             )
             .subcommand(search_command())
             .subcommand(pixels_command())
+            .subcommands(debugger_commands())
             .subcommand(Command::new(gbamod::SERVE_COMMAND).hide(true))
     }
 
@@ -133,6 +135,20 @@ mod cli {
             Some(("poke16", args)) => poke(args, Width::U16).and_then(request),
             Some(("poke32", args)) => poke(args, Width::U32).and_then(request),
             Some(("dump", args)) => request(Request::Dump { path: file(args) }),
+            Some(("watch", args)) => request(Request::Watch {
+                address: number(args, "address"),
+                on: args
+                    .get_one::<WatchKind>("on")
+                    .copied()
+                    .unwrap_or(WatchKind::Write),
+            }),
+            Some(("break", args)) => request(Request::Break {
+                address: number(args, "address"),
+                stack: args.get_one::<u32>("stack").copied().unwrap_or_default(),
+            }),
+            Some(("points", _)) => request(Request::Points),
+            Some(("clear", _)) => request(Request::Clear),
+            Some(("regs", _)) => request(Request::Regs),
             Some(("search", args)) => search(args),
             Some(("pixels", args)) => {
                 let position = |name| args.get_one::<usize>(name).copied().unwrap_or_default();
@@ -195,6 +211,35 @@ mod cli {
                 arg!(--count <token> "Count the pixels of this color token in each row instead")
                     .value_parser(value_parser!(Token)),
             )
+    }
+
+    fn debugger_commands() -> [Command; 5] {
+        [
+            Command::new("watch")
+                .about("Add a watchpoint; later commands that run frames list its hits")
+                .arg(number_arg("address", "The address to watch"))
+                .arg(
+                    arg!(--on <kind> "The accesses that fire it: write, read, access, or change")
+                        .value_parser(value_parser!(WatchKind))
+                        .default_value("write"),
+                ),
+            Command::new("break")
+                .about("Add a breakpoint; later commands that run frames list its hits")
+                .arg(number_arg(
+                    "address",
+                    "The address of the instruction to break on",
+                ))
+                .arg(
+                    arg!(--stack <words> "The number of stack words to show for each hit")
+                        .value_parser(
+                            value_parser!(u32).range(0..=i64::from(debug::MAX_STACK_WORDS)),
+                        )
+                        .default_value("0"),
+                ),
+            Command::new("points").about("List the session's watchpoints and breakpoints"),
+            Command::new("clear").about("Remove every watchpoint and breakpoint"),
+            Command::new("regs").about("Print the CPU registers as they stand between frames"),
+        ]
     }
 
     fn number_arg(name: &'static str, help: &'static str) -> Arg {
