@@ -7,6 +7,7 @@ mod cli {
     use clap::{Arg, ArgMatches, Command, arg, value_parser};
     use gbamod::keys::Keys;
     use gbamod::memory::{self, Width};
+    use gbamod::search::{Query, Rule};
     use gbamod::session::{self, Poke, Request};
     use std::path::{Path, PathBuf};
 
@@ -84,6 +85,30 @@ mod cli {
                     .about("Write the session's working RAM to a file, EWRAM then IWRAM")
                     .arg(file_arg("The dump file to write")),
             )
+            .subcommand(
+                Command::new("search")
+                    .about("List the addresses whose values changed across RAM dumps by a rule")
+                    .arg(
+                        arg!(<width> "The width of the values: u8, u16, or u32")
+                            .value_parser(value_parser!(Width)),
+                    )
+                    .arg(
+                        arg!(<rule> "How the values change across the dumps: dec, inc, same, changed, eq=N, or seq=A,B,... with * for any")
+                            .value_parser(value_parser!(Rule)),
+                    )
+                    .arg(
+                        arg!(<dumps> ... "The RAM dumps, in the order they were taken")
+                            .value_parser(value_parser!(PathBuf)),
+                    )
+                    .arg(
+                        arg!(--min <value> "The smallest value allowed in every dump")
+                            .value_parser(memory::parse_number),
+                    )
+                    .arg(
+                        arg!(--max <value> "The largest value allowed in every dump")
+                            .value_parser(memory::parse_number),
+                    ),
+            )
             .subcommand(Command::new(gbamod::SERVE_COMMAND).hide(true))
     }
 
@@ -129,6 +154,7 @@ mod cli {
             Some(("poke16", args)) => poke(args, Width::U16).and_then(request),
             Some(("poke32", args)) => poke(args, Width::U32).and_then(request),
             Some(("dump", args)) => request(Request::Dump { path: file(args) }),
+            Some(("search", args)) => search(args),
             _ => unreachable!("clap requires a known subcommand"),
         }
     }
@@ -162,6 +188,22 @@ mod cli {
             width,
             value,
         }))
+    }
+
+    /// Searches the dumps named on the command line.
+    fn search(args: &ArgMatches) -> Result<String, String> {
+        let query = Query {
+            width: args.get_one::<Width>("width").copied().unwrap_or(Width::U8),
+            rule: args.get_one::<Rule>("rule").cloned().unwrap_or(Rule::Same),
+            min: args.get_one::<u32>("min").copied().unwrap_or(0),
+            max: args.get_one::<u32>("max").copied().unwrap_or(u32::MAX),
+        };
+        let dumps: Vec<PathBuf> = args
+            .get_many::<PathBuf>("dumps")
+            .unwrap_or_default()
+            .cloned()
+            .collect();
+        query.run(&dumps).map_err(|err| err.to_string())
     }
 
     fn frames_arg() -> Arg {

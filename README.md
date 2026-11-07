@@ -2,7 +2,7 @@
 
 An emulator-driven toolkit for reverse engineering and patching [GBA](https://en.wikipedia.org/wiki/Game_Boy_Advance) games. It drives an emulator headlessly to dump and diff memory, set watchpoints and breakpoints, and assemble hooks into [IPS](https://zerosoft.zophar.net/ips.php) patches.
 
-This project is at an early stage: so far it can read a game folder, check its ROM, and play it in the emulator through a background session, with savestates, screenshots, and memory access.
+This project is at an early stage: so far it can read a game folder, check its ROM, and play it in the emulator through a background session, with savestates, screenshots, and memory access, and search memory dumps for values.
 
 ## Usage
 
@@ -47,6 +47,16 @@ gbamod dump ram.bin               # write all working RAM to a file
 ```
 
 A dump holds the 256 KiB EWRAM from `0x02000000`, followed by the 32 KiB IWRAM from `0x03000000`, so a file offset below `0x40000` is that offset into EWRAM and anything from there on is IWRAM.
+
+To find where the game keeps a value, dump the RAM at several moments, then search the dumps for addresses whose values changed across them the way that value did. The search needs no running session:
+
+```sh
+gbamod search u16 dec before.bin after.bin                # values that fell, never rising
+gbamod search u16 seq=280,273 before.bin after.bin        # exact values per dump, * for any
+gbamod search u8 inc a.bin b.bin c.bin --min 1 --max 99   # values that rose, within a range
+```
+
+The rules are `dec`, `inc`, `same`, `changed`, `eq=N`, and `seq=A,B,...`. Values are read little-endian at offsets aligned to their width, and each match prints its address and its value in every dump. A search lists the first 200 matches and counts the rest.
 
 ## Setup
 

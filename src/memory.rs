@@ -1,6 +1,7 @@
 //! Addresses, values, and layouts for reading and writing the GBA's memory.
 
 use std::fmt::Write;
+use std::str::FromStr;
 
 /// A region of the GBA's address space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,6 +29,18 @@ pub const RAM_REGIONS: [Region; 2] = [
     },
 ];
 
+/// The size in bytes of a RAM dump, which holds every region of
+/// [`RAM_REGIONS`] in turn.
+pub const RAM_DUMP_SIZE: u32 = RAM_REGIONS[0].size + RAM_REGIONS[1].size;
+
+/// Returns the address of every byte of a RAM dump, in the order the dump
+/// holds them.
+pub fn ram_addresses() -> impl Iterator<Item = u32> {
+    RAM_REGIONS
+        .iter()
+        .flat_map(|region| region.start..region.start + region.size)
+}
+
 /// The number of bytes a peek prints when no count is given.
 pub const DEFAULT_PEEK_COUNT: u32 = 16;
 
@@ -53,6 +66,9 @@ pub enum MemoryError {
     /// in 32 bits.
     #[error("`{0}` isn't a 32-bit number in decimal or 0x-prefixed hex")]
     InvalidNumber(String),
+    /// The text isn't the name of a width.
+    #[error("`{0}` isn't a width; expected u8, u16, or u32")]
+    InvalidWidth(String),
     /// The value doesn't fit in the width it's written with.
     #[error("value 0x{value:X} doesn't fit in {bits} bits")]
     TooWide {
@@ -88,10 +104,35 @@ impl Width {
         Ok(value)
     }
 
+    /// Reads a little-endian value of this width from the start of `bytes`,
+    /// treating missing bytes as zero.
+    #[must_use]
+    pub fn read(self, bytes: &[u8]) -> u32 {
+        bytes
+            .iter()
+            .take(self.bytes() as usize)
+            .rev()
+            .fold(0, |value, byte| value << 8 | u32::from(*byte))
+    }
+
     /// Formats `value` as hex padded to this width, such as `0x0120`.
     #[must_use]
     pub fn format(self, value: u32) -> String {
         format!("0x{value:0digits$X}", digits = self.bytes() as usize * 2)
+    }
+}
+
+impl FromStr for Width {
+    type Err = MemoryError;
+
+    /// Parses `u8`, `u16`, or `u32`, ignoring case.
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        match text.to_ascii_lowercase().as_str() {
+            "u8" => Ok(Self::U8),
+            "u16" => Ok(Self::U16),
+            "u32" => Ok(Self::U32),
+            _ => Err(MemoryError::InvalidWidth(text.to_string())),
+        }
     }
 }
 
@@ -179,6 +220,26 @@ mod tests {
     }
 
     #[test]
+    fn parse_widths() {
+        assert_eq!("u8".parse(), Ok(Width::U8));
+        assert_eq!("U16".parse(), Ok(Width::U16));
+        assert_eq!("u32".parse(), Ok(Width::U32));
+        assert_eq!(
+            "u64".parse::<Width>().unwrap_err().to_string(),
+            "`u64` isn't a width; expected u8, u16, or u32"
+        );
+    }
+
+    #[test]
+    fn read_values() {
+        let bytes = [0x6C, 0x31, 0x00, 0x02, 0xFF];
+        assert_eq!(Width::U8.read(&bytes), 0x6C);
+        assert_eq!(Width::U16.read(&bytes), 0x316C);
+        assert_eq!(Width::U32.read(&bytes), 0x0200_316C);
+        assert_eq!(Width::U32.read(&[0x01]), 0x01);
+    }
+
+    #[test]
     fn format_values() {
         assert_eq!(Width::U8.format(0xA), "0x0A");
         assert_eq!(Width::U16.format(0x120), "0x0120");
@@ -207,7 +268,14 @@ mod tests {
     fn describe_ram_layout() {
         let total: u32 = RAM_REGIONS.iter().map(|region| region.size).sum();
         assert_eq!(total, 288 * 1024);
+        assert_eq!(RAM_DUMP_SIZE, total);
         assert_eq!(RAM_REGIONS[0].name, "EWRAM");
         assert_eq!(RAM_REGIONS[1].start, 0x0300_0000);
+
+        let addresses: Vec<u32> = ram_addresses().collect();
+        assert_eq!(addresses.len(), RAM_DUMP_SIZE as usize);
+        assert_eq!(addresses[0], 0x0200_0000);
+        assert_eq!(addresses[0x4_0000], 0x0300_0000);
+        assert_eq!(addresses.last(), Some(&0x0300_7FFF));
     }
 }
