@@ -2,7 +2,7 @@
 
 An emulator-driven toolkit for reverse engineering and patching [GBA](https://en.wikipedia.org/wiki/Game_Boy_Advance) games. It drives an emulator headlessly to dump and diff memory, set watchpoints and breakpoints, and assemble hooks into [IPS](https://zerosoft.zophar.net/ips.php) patches.
 
-This project is at an early stage: so far it can read a game folder, check its ROM, and play it in the emulator through a background session, with savestates, screenshots, and memory access, and search memory dumps for values.
+This project is at an early stage: so far it can read a game folder, check its ROM, and play it in the emulator through a background session, with savestates, screenshots, and memory access, search memory dumps for values, and read pixels from screenshots.
 
 ## Usage
 
@@ -57,6 +57,16 @@ gbamod search u8 inc a.bin b.bin c.bin --min 1 --max 99   # values that rose, wi
 ```
 
 The rules are `dec`, `inc`, `same`, `changed`, `eq=N`, and `seq=A,B,...`. Values are read little-endian at offsets aligned to their width, and each match prints its address and its value in every dump. A search lists the first 200 matches and counts the rest.
+
+To check what a change did on screen, read pixels from a screenshot. Each pixel prints as a color token of three hex digits, the top 4 bits of its red, green, and blue, such as `0ce`:
+
+```sh
+gbamod pixels shot.png 16 145 48 2            # a 48x2 box from (16, 145), one row per line
+gbamod pixels shot.png 16 145                 # a single pixel
+gbamod pixels shot.png 16 145 48 --count 0ce  # how many pixels in each row are 0ce
+```
+
+Counting reads the length of a bar or gauge straight off, such as `145: 46 of 48`.
 
 ## Setup
 

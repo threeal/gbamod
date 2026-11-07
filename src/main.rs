@@ -7,6 +7,7 @@ mod cli {
     use clap::{Arg, ArgMatches, Command, arg, value_parser};
     use gbamod::keys::Keys;
     use gbamod::memory::{self, Width};
+    use gbamod::pixels::{self, Area, Token};
     use gbamod::search::{Query, Rule};
     use gbamod::session::{self, Poke, Request};
     use std::path::{Path, PathBuf};
@@ -85,30 +86,8 @@ mod cli {
                     .about("Write the session's working RAM to a file, EWRAM then IWRAM")
                     .arg(file_arg("The dump file to write")),
             )
-            .subcommand(
-                Command::new("search")
-                    .about("List the addresses whose values changed across RAM dumps by a rule")
-                    .arg(
-                        arg!(<width> "The width of the values: u8, u16, or u32")
-                            .value_parser(value_parser!(Width)),
-                    )
-                    .arg(
-                        arg!(<rule> "How the values change across the dumps: dec, inc, same, changed, eq=N, or seq=A,B,... with * for any")
-                            .value_parser(value_parser!(Rule)),
-                    )
-                    .arg(
-                        arg!(<dumps> ... "The RAM dumps, in the order they were taken")
-                            .value_parser(value_parser!(PathBuf)),
-                    )
-                    .arg(
-                        arg!(--min <value> "The smallest value allowed in every dump")
-                            .value_parser(memory::parse_number),
-                    )
-                    .arg(
-                        arg!(--max <value> "The largest value allowed in every dump")
-                            .value_parser(memory::parse_number),
-                    ),
-            )
+            .subcommand(search_command())
+            .subcommand(pixels_command())
             .subcommand(Command::new(gbamod::SERVE_COMMAND).hide(true))
     }
 
@@ -155,8 +134,67 @@ mod cli {
             Some(("poke32", args)) => poke(args, Width::U32).and_then(request),
             Some(("dump", args)) => request(Request::Dump { path: file(args) }),
             Some(("search", args)) => search(args),
+            Some(("pixels", args)) => {
+                let position = |name| args.get_one::<usize>(name).copied().unwrap_or_default();
+                let area = Area {
+                    x: position("x"),
+                    y: position("y"),
+                    width: position("width"),
+                    height: position("height"),
+                };
+                let file = args.get_one::<PathBuf>("file").cloned().unwrap_or_default();
+                pixels::run(&file, area, args.get_one::<Token>("count").copied())
+                    .map_err(|err| err.to_string())
+            }
             _ => unreachable!("clap requires a known subcommand"),
         }
+    }
+
+    fn search_command() -> Command {
+        Command::new("search")
+            .about("List the addresses whose values changed across RAM dumps by a rule")
+            .arg(
+                arg!(<width> "The width of the values: u8, u16, or u32")
+                    .value_parser(value_parser!(Width)),
+            )
+            .arg(
+                arg!(<rule> "How the values change across the dumps: dec, inc, same, changed, eq=N, or seq=A,B,... with * for any")
+                    .value_parser(value_parser!(Rule)),
+            )
+            .arg(
+                arg!(<dumps> ... "The RAM dumps, in the order they were taken")
+                    .value_parser(value_parser!(PathBuf)),
+            )
+            .arg(
+                arg!(--min <value> "The smallest value allowed in every dump")
+                    .value_parser(memory::parse_number),
+            )
+            .arg(
+                arg!(--max <value> "The largest value allowed in every dump")
+                    .value_parser(memory::parse_number),
+            )
+    }
+
+    fn pixels_command() -> Command {
+        Command::new("pixels")
+            .about("Print a box of pixels from a screenshot as color tokens such as 0ce")
+            .arg(arg!(<file> "The PNG screenshot to read").value_parser(value_parser!(PathBuf)))
+            .arg(arg!(<x> "The column of the box's left edge").value_parser(value_parser!(usize)))
+            .arg(arg!(<y> "The row of the box's top edge").value_parser(value_parser!(usize)))
+            .arg(
+                arg!([width] "The number of columns in the box")
+                    .value_parser(value_parser!(usize))
+                    .default_value("1"),
+            )
+            .arg(
+                arg!([height] "The number of rows in the box")
+                    .value_parser(value_parser!(usize))
+                    .default_value("1"),
+            )
+            .arg(
+                arg!(--count <token> "Count the pixels of this color token in each row instead")
+                    .value_parser(value_parser!(Token)),
+            )
     }
 
     fn number_arg(name: &'static str, help: &'static str) -> Arg {
