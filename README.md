@@ -2,7 +2,7 @@
 
 An emulator-driven toolkit for reverse engineering and patching [GBA](https://en.wikipedia.org/wiki/Game_Boy_Advance) games. It drives an emulator headlessly to dump and diff memory, set watchpoints and breakpoints, and assemble hooks into [IPS](https://zerosoft.zophar.net/ips.php) patches.
 
-This project is at an early stage: so far it can read a game folder, check its ROM, and play it in the emulator through a background session, with savestates, screenshots, and memory access, search memory dumps for values, and read pixels from screenshots.
+This project is at an early stage: so far it can read a game folder, check its ROM, and play it in the emulator through a background session, with savestates, screenshots, memory access, watchpoints, and breakpoints. It can also search memory dumps for values and read pixels from screenshots.
 
 ## Usage
 
@@ -47,6 +47,18 @@ gbamod dump ram.bin               # write all working RAM to a file
 ```
 
 A dump holds the 256 KiB EWRAM from `0x02000000`, followed by the 32 KiB IWRAM from `0x03000000`, so a file offset below `0x40000` is that offset into EWRAM and anything from there on is IWRAM.
+
+To find the code that changes a value, set watchpoints and breakpoints. The game keeps running when one fires: the hit is recorded, and `run` and `tap` list their hits after their usual message:
+
+```sh
+gbamod watch 0x0200316C              # writes to an address; or --on read, access, or change
+gbamod break 0x0804FD08 --stack 48   # an instruction, showing 48 words of the stack at each hit
+gbamod points                        # list the points
+gbamod clear                         # remove them all
+gbamod regs                          # print the CPU registers between frames
+```
+
+A watchpoint hit shows the old and new value, the address of the instruction that made the access, `lr`, and `r0` to `r3`. A breakpoint hit shows every register, `cpsr` with the CPU state, and the requested stack words. A command lists its first 50 hits and counts the rest.
 
 To find where the game keeps a value, dump the RAM at several moments, then search the dumps for addresses whose values changed across them the way that value did. The search needs no running session:
 

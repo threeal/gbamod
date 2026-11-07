@@ -1,5 +1,6 @@
 //! An emulator-driven toolkit for reverse engineering and patching GBA games.
 
+pub mod debug;
 #[cfg(not(tarpaulin_include))]
 pub mod emulator;
 pub mod game;

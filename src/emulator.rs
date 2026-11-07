@@ -4,6 +4,7 @@
 //! This module needs a real ROM to do anything, so it's excluded from the
 //! coverage check.
 
+use crate::debug::{self, Access, Hit, Hits, Registers, WatchKind};
 use crate::keys::Keys;
 use crate::memory::Width;
 use crate::rom::Rom;
@@ -21,6 +22,26 @@ struct RawEmulator {
     _private: [u8; 0],
 }
 
+/// A hit recorded by the C shim, laid out as its `struct gbamod_hit`.
+#[repr(C)]
+struct RawHit {
+    point: i64,
+    frame: u32,
+    address: u32,
+    access: u32,
+    old_value: u32,
+    new_value: u32,
+    registers: [u32; 16],
+    cpsr: u32,
+    stack: [u32; debug::MAX_STACK_WORDS as usize],
+}
+
+/// mGBA's `mWatchpointType` values.
+const WATCHPOINT_WRITE: u32 = 1;
+const WATCHPOINT_READ: u32 = 2;
+const WATCHPOINT_RW: u32 = 3;
+const WATCHPOINT_WRITE_CHANGE: u32 = 5;
+
 unsafe extern "C" {
     fn gbamod_emulator_new(rom: *const c_void, size: usize) -> *mut RawEmulator;
     fn gbamod_emulator_free(emulator: *mut RawEmulator);
@@ -32,6 +53,16 @@ unsafe extern "C" {
     fn gbamod_emulator_save_state(emulator: *const RawEmulator, state: *mut c_void) -> bool;
     fn gbamod_emulator_read8(emulator: *const RawEmulator, address: u32) -> u8;
     fn gbamod_emulator_write(emulator: *mut RawEmulator, address: u32, width: u32, value: u32);
+    fn gbamod_emulator_watch(emulator: *mut RawEmulator, address: u32, kind: u32) -> i64;
+    fn gbamod_emulator_break(emulator: *mut RawEmulator, address: u32) -> i64;
+    fn gbamod_emulator_clear_point(emulator: *mut RawEmulator, id: i64);
+    fn gbamod_emulator_hits(
+        emulator: *const RawEmulator,
+        kept: *mut usize,
+        total: *mut u32,
+    ) -> *const RawHit;
+    fn gbamod_emulator_clear_hits(emulator: *mut RawEmulator);
+    fn gbamod_emulator_registers(emulator: *const RawEmulator, registers: *mut u32);
     fn gbamod_emulator_load_state(
         emulator: *mut RawEmulator,
         state: *const c_void,
@@ -125,6 +156,83 @@ impl Machine for Emulator {
     fn write(&mut self, address: u32, width: Width, value: u32) {
         // SAFETY: `raw` is a live emulator owned by `self`.
         unsafe { gbamod_emulator_write(self.raw.as_ptr(), address, width.bytes(), value) };
+    }
+
+    fn add_watchpoint(&mut self, address: u32, kind: WatchKind) -> i64 {
+        let kind = match kind {
+            WatchKind::Write => WATCHPOINT_WRITE,
+            WatchKind::Read => WATCHPOINT_READ,
+            WatchKind::Access => WATCHPOINT_RW,
+            WatchKind::Change => WATCHPOINT_WRITE_CHANGE,
+        };
+        // SAFETY: `raw` is a live emulator owned by `self`.
+        unsafe { gbamod_emulator_watch(self.raw.as_ptr(), address, kind) }
+    }
+
+    fn add_breakpoint(&mut self, address: u32) -> i64 {
+        // SAFETY: `raw` is a live emulator owned by `self`.
+        unsafe { gbamod_emulator_break(self.raw.as_ptr(), address) }
+    }
+
+    fn clear_point(&mut self, id: i64) {
+        // SAFETY: `raw` is a live emulator owned by `self`.
+        unsafe { gbamod_emulator_clear_point(self.raw.as_ptr(), id) };
+    }
+
+    fn take_hits(&mut self) -> Hits {
+        let mut kept = 0;
+        let mut total = 0;
+        // SAFETY: `raw` is a live emulator owned by `self`, and the shim
+        // returns an array of `kept` hits that stays valid until the hits are
+        // cleared, after they're copied here.
+        unsafe {
+            let raw = gbamod_emulator_hits(self.raw.as_ptr(), &raw mut kept, &raw mut total);
+            let kept = std::slice::from_raw_parts(raw, kept)
+                .iter()
+                .map(Hit::from)
+                .collect();
+            gbamod_emulator_clear_hits(self.raw.as_ptr());
+            Hits { kept, total }
+        }
+    }
+
+    fn registers(&self) -> Registers {
+        let mut values = [0; 17];
+        // SAFETY: `raw` is a live emulator owned by `self`, and the shim
+        // writes exactly 17 values.
+        unsafe { gbamod_emulator_registers(self.raw.as_ptr(), values.as_mut_ptr()) };
+        let mut general = [0; 16];
+        general.copy_from_slice(&values[..16]);
+        Registers {
+            general,
+            cpsr: values[16],
+        }
+    }
+}
+
+impl From<&RawHit> for Hit {
+    fn from(raw: &RawHit) -> Self {
+        let access = match raw.access {
+            0 => Access::Execute,
+            2 => Access::Read {
+                value: raw.old_value,
+            },
+            _ => Access::Write {
+                old: raw.old_value,
+                new: raw.new_value,
+            },
+        };
+        Self {
+            point: raw.point,
+            frame: raw.frame,
+            address: raw.address,
+            access,
+            registers: Registers {
+                general: raw.registers,
+                cpsr: raw.cpsr,
+            },
+            stack: raw.stack.to_vec(),
+        }
     }
 }
 
