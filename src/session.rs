@@ -69,7 +69,7 @@ pub enum Request {
     },
     /// Writes a value to memory.
     Poke(Poke),
-    /// Writes all working RAM to a file, laid out as [`memory::RAM_REGIONS`].
+    /// Writes all working RAM to a file, laid out as [`memory::ram_addresses`].
     Dump {
         /// The dump file.
         path: PathBuf,
@@ -188,9 +188,7 @@ impl<M: Machine> Session<M> {
             }
             Request::Poke(poke) => self.poke(*poke),
             Request::Dump { path } => {
-                let bytes: Vec<u8> = memory::RAM_REGIONS
-                    .iter()
-                    .flat_map(|region| region.start..region.start + region.size)
+                let bytes: Vec<u8> = memory::ram_addresses()
                     .map(|address| self.machine.read_byte(address))
                     .collect();
                 write(path, &bytes)?;

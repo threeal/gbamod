@@ -8,6 +8,7 @@ pub mod manifest;
 pub mod memory;
 pub mod rom;
 pub mod screen;
+pub mod search;
 pub mod session;
 
 use game::{Game, GameError};
