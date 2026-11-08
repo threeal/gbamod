@@ -105,6 +105,9 @@ mod cli {
                             .value_parser(memory::parse_number),
                     ),
             )
+            .subcommand(Command::new("build").about(
+                "Apply the manifest's patches to the ROM and write the patched ROM and IPS patch",
+            ))
             .subcommand(Command::new(gbamod::SERVE_COMMAND).hide(true))
     }
 
@@ -176,6 +179,7 @@ mod cli {
                 let file = args.get_one::<PathBuf>("file").cloned().unwrap_or_default();
                 asm::run(&file, number(args, "at")).map_err(|err| err.to_string())
             }
+            Some(("build", _)) => gbamod::build(dir).map_err(|err| err.to_string()),
             Some(("search", args)) => search(args),
             Some(("pixels", args)) => {
                 let position = |name| args.get_one::<usize>(name).copied().unwrap_or_default();

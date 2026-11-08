@@ -1,15 +1,29 @@
 //! The `gbamod.toml` manifest that describes a game folder.
 
+use crate::patch::{self, Patch};
 use std::path::PathBuf;
 
 /// The file name of the manifest at the root of a game folder.
 pub const FILE_NAME: &str = "gbamod.toml";
 
 /// The contents of a manifest, independent of the version it was written in.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Manifest {
     /// The path of the game's ROM, relative to the game folder.
     pub rom: PathBuf,
+    /// The files the `build` command writes.
+    pub output: Output,
+    /// The patches to write over the ROM, in order.
+    pub patches: Vec<Patch>,
+}
+
+/// The files the `build` command writes, relative to the game folder.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Output {
+    /// The patched ROM, if one is written.
+    pub rom: Option<PathBuf>,
+    /// The IPS patch, if one is written.
+    pub ips: Option<PathBuf>,
 }
 
 /// The reason a manifest couldn't be parsed.
@@ -39,6 +53,40 @@ struct ManifestV1 {
     #[serde(rename = "version")]
     _version: i64,
     rom: PathBuf,
+    #[serde(default)]
+    output: OutputV1,
+    #[serde(default, rename = "patch")]
+    patches: Vec<PatchV1>,
+}
+
+/// The `[output]` table of a version 1 manifest.
+#[derive(Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OutputV1 {
+    rom: Option<PathBuf>,
+    ips: Option<PathBuf>,
+}
+
+/// A `[[patch]]` entry of a version 1 manifest.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PatchV1 {
+    at: u32,
+    bytes: Hex,
+    expect: Option<Hex>,
+}
+
+/// Bytes written in a manifest as a string of hex digits.
+#[derive(serde::Deserialize)]
+#[serde(try_from = "String")]
+struct Hex(Vec<u8>);
+
+impl TryFrom<String> for Hex {
+    type Error = patch::HexError;
+
+    fn try_from(text: String) -> Result<Self, Self::Error> {
+        patch::parse_hex(&text).map(Self)
+    }
 }
 
 impl Manifest {
@@ -53,7 +101,22 @@ impl Manifest {
         match version {
             Some(1) => {
                 let manifest: ManifestV1 = toml::from_str(text)?;
-                Ok(Self { rom: manifest.rom })
+                Ok(Self {
+                    rom: manifest.rom,
+                    output: Output {
+                        rom: manifest.output.rom,
+                        ips: manifest.output.ips,
+                    },
+                    patches: manifest
+                        .patches
+                        .into_iter()
+                        .map(|patch| Patch {
+                            at: patch.at,
+                            bytes: patch.bytes.0,
+                            expect: patch.expect.map(|expect| expect.0),
+                        })
+                        .collect(),
+                })
             }
             Some(version) => Err(ManifestError::UnsupportedVersion(version)),
             None => Err(ManifestError::MissingVersion),
@@ -71,9 +134,66 @@ mod tests {
         assert_eq!(
             manifest,
             Manifest {
-                rom: "roms/game.gba".into()
+                rom: "roms/game.gba".into(),
+                ..Manifest::default()
             }
         );
+    }
+
+    #[test]
+    fn parse_v1_manifest_with_patches() {
+        let manifest = Manifest::parse(
+            "version = 1\n\
+             rom = \"roms/game.gba\"\n\
+             [output]\n\
+             rom = \"out/mod.gba\"\n\
+             ips = \"out/mod.ips\"\n\
+             [[patch]]\n\
+             at = 0x0800FA68\n\
+             expect = \"79 6A 00 08\"\n\
+             bytes = \"01 F0 CB 08\"\n\
+             [[patch]]\n\
+             at = 0x08CBF000\n\
+             bytes = \"10B5\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            manifest,
+            Manifest {
+                rom: "roms/game.gba".into(),
+                output: Output {
+                    rom: Some("out/mod.gba".into()),
+                    ips: Some("out/mod.ips".into()),
+                },
+                patches: vec![
+                    Patch {
+                        at: 0x0800_FA68,
+                        bytes: vec![0x01, 0xF0, 0xCB, 0x08],
+                        expect: Some(vec![0x79, 0x6A, 0x00, 0x08]),
+                    },
+                    Patch {
+                        at: 0x08CB_F000,
+                        bytes: vec![0x10, 0xB5],
+                        expect: None,
+                    },
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn reject_v1_manifest_with_bad_patch() {
+        let err = Manifest::parse(
+            "version = 1\nrom = \"game.gba\"\n[[patch]]\nat = 0x08000000\nbytes = \"0x10\"\n",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("`0x10` isn't hex bytes"), "{err}");
+
+        let err = Manifest::parse(
+            "version = 1\nrom = \"game.gba\"\n[[patch]]\nat = -1\nbytes = \"10\"\n",
+        )
+        .unwrap_err();
+        assert!(matches!(err, ManifestError::Toml(_)));
     }
 
     #[test]
