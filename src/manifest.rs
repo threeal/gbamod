@@ -1,6 +1,6 @@
 //! The `gbamod.toml` manifest that describes a game folder.
 
-use crate::patch::{self, Patch};
+use crate::patch;
 use std::path::PathBuf;
 
 /// The file name of the manifest at the root of a game folder.
@@ -13,8 +13,37 @@ pub struct Manifest {
     pub rom: PathBuf,
     /// The files the `build` command writes.
     pub output: Output,
-    /// The patches to write over the ROM, in order.
-    pub patches: Vec<Patch>,
+    /// The bytes to write over the ROM, in order.
+    pub patches: Vec<BytePatch>,
+    /// The hooks to place in the ROM, in order.
+    pub hooks: Vec<Hook>,
+}
+
+/// Bytes to write over the ROM at an address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BytePatch {
+    /// The address of the first byte to write.
+    pub at: u32,
+    /// The bytes to write.
+    pub bytes: Vec<u8>,
+    /// The bytes the ROM must hold there before the patch, if given.
+    pub expect: Option<Vec<u8>>,
+}
+
+/// Thumb code assembled into free space in the ROM, with pointers the game
+/// follows redirected to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hook {
+    /// The assembly file, relative to the game folder.
+    pub source: PathBuf,
+    /// The address the code is placed at, in free space.
+    pub at: u32,
+    /// The pointer the hook takes over, which its code can refer to as
+    /// `ORIGINAL`.
+    pub replaces: Option<u32>,
+    /// The addresses of the words that hold `replaces`, which are pointed at
+    /// the hook.
+    pub slots: Vec<u32>,
 }
 
 /// The files the `build` command writes, relative to the game folder.
@@ -57,6 +86,8 @@ struct ManifestV1 {
     output: OutputV1,
     #[serde(default, rename = "patch")]
     patches: Vec<PatchV1>,
+    #[serde(default, rename = "hook")]
+    hooks: Vec<HookV1>,
 }
 
 /// The `[output]` table of a version 1 manifest.
@@ -74,6 +105,17 @@ struct PatchV1 {
     at: u32,
     bytes: Hex,
     expect: Option<Hex>,
+}
+
+/// A `[[hook]]` entry of a version 1 manifest.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HookV1 {
+    source: PathBuf,
+    at: u32,
+    replaces: Option<u32>,
+    #[serde(default)]
+    slots: Vec<u32>,
 }
 
 /// Bytes written in a manifest as a string of hex digits.
@@ -110,10 +152,20 @@ impl Manifest {
                     patches: manifest
                         .patches
                         .into_iter()
-                        .map(|patch| Patch {
+                        .map(|patch| BytePatch {
                             at: patch.at,
                             bytes: patch.bytes.0,
                             expect: patch.expect.map(|expect| expect.0),
+                        })
+                        .collect(),
+                    hooks: manifest
+                        .hooks
+                        .into_iter()
+                        .map(|hook| Hook {
+                            source: hook.source,
+                            at: hook.at,
+                            replaces: hook.replaces,
+                            slots: hook.slots,
                         })
                         .collect(),
                 })
@@ -141,7 +193,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_v1_manifest_with_patches() {
+    fn parse_v1_manifest_with_patches_and_hooks() {
         let manifest = Manifest::parse(
             "version = 1\n\
              rom = \"roms/game.gba\"\n\
@@ -154,7 +206,15 @@ mod tests {
              bytes = \"01 F0 CB 08\"\n\
              [[patch]]\n\
              at = 0x08CBF000\n\
-             bytes = \"10B5\"\n",
+             bytes = \"10B5\"\n\
+             [[hook]]\n\
+             source = \"hooks/guard.s\"\n\
+             at = 0x08CBF080\n\
+             replaces = 0x0804FD09\n\
+             slots = [0x08CBC850, 0x08CBC9F0]\n\
+             [[hook]]\n\
+             source = \"hooks/new.s\"\n\
+             at = 0x08CBF100\n",
         )
         .unwrap();
         assert_eq!(
@@ -166,15 +226,29 @@ mod tests {
                     ips: Some("out/mod.ips".into()),
                 },
                 patches: vec![
-                    Patch {
+                    BytePatch {
                         at: 0x0800_FA68,
                         bytes: vec![0x01, 0xF0, 0xCB, 0x08],
                         expect: Some(vec![0x79, 0x6A, 0x00, 0x08]),
                     },
-                    Patch {
+                    BytePatch {
                         at: 0x08CB_F000,
                         bytes: vec![0x10, 0xB5],
                         expect: None,
+                    },
+                ],
+                hooks: vec![
+                    Hook {
+                        source: "hooks/guard.s".into(),
+                        at: 0x08CB_F080,
+                        replaces: Some(0x0804_FD09),
+                        slots: vec![0x08CB_C850, 0x08CB_C9F0],
+                    },
+                    Hook {
+                        source: "hooks/new.s".into(),
+                        at: 0x08CB_F100,
+                        replaces: None,
+                        slots: vec![],
                     },
                 ],
             }

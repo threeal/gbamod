@@ -2,7 +2,7 @@
 
 An emulator-driven toolkit for reverse engineering and patching [GBA](https://en.wikipedia.org/wiki/Game_Boy_Advance) games. It drives an emulator headlessly to dump and diff memory, set watchpoints and breakpoints, and assemble hooks into [IPS](https://zerosoft.zophar.net/ips.php) patches.
 
-This project is at an early stage: so far it can read a game folder, check its ROM, and play it in the emulator through a background session, with savestates, screenshots, memory access, disassembly, watchpoints, and breakpoints. It can also search memory dumps for values, read pixels from screenshots, assemble Thumb code, and apply byte patches to build a patched ROM and an IPS patch.
+This project is at an early stage: so far it can read a game folder, check its ROM, and play it in the emulator through a background session, with savestates, screenshots, memory access, disassembly, watchpoints, and breakpoints. It can also search memory dumps for values, read pixels from screenshots, assemble Thumb code, and build a patched ROM and an IPS patch from byte patches and hooks.
 
 ## Usage
 
@@ -135,6 +135,24 @@ gbamod build
 ```
 
 Before writing anything, it checks that every patch lies in the ROM, matches the bytes it expects, and doesn't overlap another, and lists each patch that fails. It then writes the patched ROM and the IPS patch, either of which can be left out. The game's ROM is only read.
+
+A hook is listed by its assembly file instead of its bytes. `build` assembles it at `at`, which must be free space, all `0xFF` or all `0x00`, and points each slot at it, after checking that the slot holds the pointer given as `replaces`. The slots are the words the game follows to the code being hooked, such as a literal a call site loads or an entry in a vtable:
+
+```toml
+[[hook]]
+source = "hooks/guard.s"
+at = 0x08CBF080
+replaces = 0x0804FD09
+slots = [0x08CBC850, 0x08CBC9F0]
+```
+
+The hook's code can call or jump to the pointer it replaces as `ORIGINAL`, such as `ldr r3, =ORIGINAL` followed by `bx r3`.
+
+To try the mod, start a session on the ROM with the patches and hooks applied in memory, then play it with the usual session commands:
+
+```sh
+gbamod start --patched
+```
 
 ## Setup
 
