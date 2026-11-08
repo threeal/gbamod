@@ -56,10 +56,17 @@ pub fn line(address: u32, mode: Mode, instruction: &Instruction) -> String {
         (Mode::Thumb, _) => format!("{:04X} {:04X}", opcode >> 16, opcode & 0xFFFF),
         (Mode::Arm, _) => format!("{opcode:08X}"),
     };
-    if instruction.text.is_empty() {
+    row(address, &encoding, &instruction.text)
+}
+
+/// Formats a line of a listing as an address, an encoding, and a text, which
+/// may be empty.
+#[must_use]
+pub fn row(address: u32, encoding: &str, text: &str) -> String {
+    if text.is_empty() {
         format!("{address:08X}: {encoding}")
     } else {
-        format!("{address:08X}: {encoding:<9}  {}", instruction.text)
+        format!("{address:08X}: {encoding:<9}  {text}")
     }
 }
 

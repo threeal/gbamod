@@ -2,7 +2,7 @@
 
 An emulator-driven toolkit for reverse engineering and patching [GBA](https://en.wikipedia.org/wiki/Game_Boy_Advance) games. It drives an emulator headlessly to dump and diff memory, set watchpoints and breakpoints, and assemble hooks into [IPS](https://zerosoft.zophar.net/ips.php) patches.
 
-This project is at an early stage: so far it can read a game folder, check its ROM, and play it in the emulator through a background session, with savestates, screenshots, memory access, disassembly, watchpoints, and breakpoints. It can also search memory dumps for values and read pixels from screenshots.
+This project is at an early stage: so far it can read a game folder, check its ROM, and play it in the emulator through a background session, with savestates, screenshots, memory access, disassembly, watchpoints, and breakpoints. It can also search memory dumps for values, read pixels from screenshots, and assemble Thumb code.
 
 ## Usage
 
@@ -89,6 +89,28 @@ gbamod pixels shot.png 16 145 48 --count 0ce  # how many pixels in each row are 
 ```
 
 Counting reads the length of a bar or gauge straight off, such as `145: 46 of 48`.
+
+To write a hook, assemble a file of Thumb code placed at the address it will be loaded at, such as free space at the end of the ROM. Assembly needs no running session:
+
+```sh
+gbamod asm hook.s --at 0x08CBF000
+```
+
+Instructions are written the way `dis` prints them, plus `push`, `pop`, and `nop`, so code can be copied from a disassembly:
+
+```asm
+.equ ORIGINAL, 0x08006A79   @ name an address
+        push {r4, lr}
+        ldr r4, =ORIGINAL   @ load a 32-bit value from the literal pool
+        bl call_r4          @ branch to a label, or to an address such as 0x080BC778
+        pop {r4}
+        pop {r1}
+        bx r1
+call_r4:
+        bx r4
+```
+
+Each value loaded with `=` is placed once in a literal pool after the code, word aligned, in order of first use. `.byte`, `.hword`, and `.word` place data, `.align 2` pads to a multiple of 4, and `@` starts a comment. The listing shows each line's address, encoding, and source, followed by the literal pool, and an error names the line it's on.
 
 ## Setup
 

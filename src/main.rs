@@ -5,6 +5,7 @@
 #[cfg(not(tarpaulin_include))]
 mod cli {
     use clap::{Arg, ArgMatches, Command, arg, value_parser};
+    use gbamod::asm;
     use gbamod::debug::{self, WatchKind};
     use gbamod::disasm;
     use gbamod::keys::Keys;
@@ -91,6 +92,19 @@ mod cli {
             .subcommand(search_command())
             .subcommand(pixels_command())
             .subcommands(debugger_commands())
+            .subcommand(
+                Command::new("asm")
+                    .about("Assemble a file of Thumb code placed at an address, and list it")
+                    .arg(
+                        arg!(<file> "The assembly file to read")
+                            .value_parser(value_parser!(PathBuf)),
+                    )
+                    .arg(
+                        arg!(--at <address> "The address the code starts at")
+                            .required(true)
+                            .value_parser(memory::parse_number),
+                    ),
+            )
             .subcommand(Command::new(gbamod::SERVE_COMMAND).hide(true))
     }
 
@@ -158,6 +172,10 @@ mod cli {
             Some(("points", _)) => request(Request::Points),
             Some(("clear", _)) => request(Request::Clear),
             Some(("regs", _)) => request(Request::Regs),
+            Some(("asm", args)) => {
+                let file = args.get_one::<PathBuf>("file").cloned().unwrap_or_default();
+                asm::run(&file, number(args, "at")).map_err(|err| err.to_string())
+            }
             Some(("search", args)) => search(args),
             Some(("pixels", args)) => {
                 let position = |name| args.get_one::<usize>(name).copied().unwrap_or_default();
