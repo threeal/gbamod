@@ -2,7 +2,7 @@
 
 An emulator-driven toolkit for reverse engineering and patching [GBA](https://en.wikipedia.org/wiki/Game_Boy_Advance) games. It drives an emulator headlessly to dump and diff memory, set watchpoints and breakpoints, and assemble hooks into [IPS](https://zerosoft.zophar.net/ips.php) patches.
 
-This project is at an early stage: so far it can read a game folder, check its ROM, and play it in the emulator through a background session, with savestates, screenshots, memory access, disassembly, watchpoints, and breakpoints. It can also search memory dumps for values, read pixels from screenshots, and assemble Thumb code.
+This project is at an early stage: so far it can read a game folder, check its ROM, and play it in the emulator through a background session, with savestates, screenshots, memory access, disassembly, watchpoints, and breakpoints. It can also search memory dumps for values, read pixels from screenshots, assemble Thumb code, and apply byte patches to build a patched ROM and an IPS patch.
 
 ## Usage
 
@@ -111,6 +111,30 @@ call_r4:
 ```
 
 Each value loaded with `=` is placed once in a literal pool after the code, word aligned, in order of first use. `.byte`, `.hword`, and `.word` place data, `.align 2` pads to a multiple of 4, and `@` starts a comment. The listing shows each line's address, encoding, and source, followed by the literal pool, and an error names the line it's on.
+
+To build the mod, list its patches in the manifest, along with the files to write. Each patch writes bytes at a ROM address, and can give the bytes it expects to find there, such as the pointer it replaces or the free space it fills:
+
+```toml
+version = 1
+rom = "roms/game.gba"
+
+[output]
+rom = "out/mod.gba"
+ips = "out/mod.ips"
+
+[[patch]]
+at = 0x0800FA68
+expect = "79 6A 00 08"
+bytes = "01 F0 CB 08"
+```
+
+Then apply them:
+
+```sh
+gbamod build
+```
+
+Before writing anything, it checks that every patch lies in the ROM, matches the bytes it expects, and doesn't overlap another, and lists each patch that fails. It then writes the patched ROM and the IPS patch, either of which can be left out. The game's ROM is only read.
 
 ## Setup
 
