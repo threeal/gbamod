@@ -6,11 +6,12 @@
 mod cli {
     use clap::{Arg, ArgMatches, Command, arg, value_parser};
     use gbamod::debug::{self, WatchKind};
+    use gbamod::disasm;
     use gbamod::keys::Keys;
     use gbamod::memory::{self, Width};
     use gbamod::pixels::{self, Area, Token};
     use gbamod::search::{Query, Rule};
-    use gbamod::session::{self, Poke, Request};
+    use gbamod::session::{self, Dis, Poke, Request};
     use std::path::{Path, PathBuf};
 
     /// Defines the command line.
@@ -135,6 +136,14 @@ mod cli {
             Some(("poke16", args)) => poke(args, Width::U16).and_then(request),
             Some(("poke32", args)) => poke(args, Width::U32).and_then(request),
             Some(("dump", args)) => request(Request::Dump { path: file(args) }),
+            Some(("dis", args)) => request(Request::Dis(Dis {
+                address: number(args, "address"),
+                count: args
+                    .get_one::<u32>("count")
+                    .copied()
+                    .unwrap_or(disasm::DEFAULT_COUNT),
+                arm: args.get_flag("arm"),
+            })),
             Some(("watch", args)) => request(Request::Watch {
                 address: number(args, "address"),
                 on: args
@@ -213,8 +222,20 @@ mod cli {
             )
     }
 
-    fn debugger_commands() -> [Command; 5] {
+    fn debugger_commands() -> [Command; 6] {
         [
+            Command::new("dis")
+                .about("Disassemble code from the session's memory, as Thumb unless --arm is given")
+                .arg(number_arg(
+                    "address",
+                    "The address of the first instruction; a Thumb function pointer's low bit is ignored",
+                ))
+                .arg(
+                    Arg::new("count")
+                        .help("The number of instructions to print [default: 16]")
+                        .value_parser(memory::parse_number),
+                )
+                .arg(arg!(--arm "Read the code as ARM instead of Thumb")),
             Command::new("watch")
                 .about("Add a watchpoint; later commands that run frames list its hits")
                 .arg(number_arg("address", "The address to watch"))

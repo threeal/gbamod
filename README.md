@@ -2,7 +2,7 @@
 
 An emulator-driven toolkit for reverse engineering and patching [GBA](https://en.wikipedia.org/wiki/Game_Boy_Advance) games. It drives an emulator headlessly to dump and diff memory, set watchpoints and breakpoints, and assemble hooks into [IPS](https://zerosoft.zophar.net/ips.php) patches.
 
-This project is at an early stage: so far it can read a game folder, check its ROM, and play it in the emulator through a background session, with savestates, screenshots, memory access, watchpoints, and breakpoints. It can also search memory dumps for values and read pixels from screenshots.
+This project is at an early stage: so far it can read a game folder, check its ROM, and play it in the emulator through a background session, with savestates, screenshots, memory access, disassembly, watchpoints, and breakpoints. It can also search memory dumps for values and read pixels from screenshots.
 
 ## Usage
 
@@ -47,6 +47,16 @@ gbamod dump ram.bin               # write all working RAM to a file
 ```
 
 A dump holds the 256 KiB EWRAM from `0x02000000`, followed by the 32 KiB IWRAM from `0x03000000`, so a file offset below `0x40000` is that offset into EWRAM and anything from there on is IWRAM.
+
+Disassemble code from the session's memory, in the ROM or in RAM:
+
+```sh
+gbamod dis 0x0804FD09        # 16 Thumb instructions; the low bit of a function pointer is ignored
+gbamod dis 0x0800F9EA 40     # a given number of instructions
+gbamod dis 0x08000000 --arm  # ARM code
+```
+
+Each line shows the address, the encoding, and the instruction. A Thumb `bl` is shown as one instruction with its target, and a load from a literal pool shows the value it loads and where from, such as `ldr r2, =0x08006A79  @ 0x0800FA68`.
 
 To find the code that changes a value, set watchpoints and breakpoints. The game keeps running when one fires: the hit is recorded, and `run` and `tap` list their hits after their usual message:
 

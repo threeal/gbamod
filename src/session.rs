@@ -5,6 +5,7 @@
 //! line of JSON, and reads back one line holding the result.
 
 use crate::debug::{self, Hits, Point, PointKind, Registers, WatchKind};
+use crate::disasm::{self, Instruction, Mode};
 use crate::keys::Keys;
 use crate::memory::{self, Width};
 use crate::screen::Screen;
@@ -75,6 +76,8 @@ pub enum Request {
         /// The dump file.
         path: PathBuf,
     },
+    /// Disassembles code.
+    Dis(Dis),
     /// Adds a watchpoint, whose hits later commands list.
     Watch {
         /// The address to watch.
@@ -110,6 +113,18 @@ pub struct Poke {
     pub value: u32,
 }
 
+/// Code to disassemble.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Dis {
+    /// The address of the first instruction. Unless `arm` is set, the low
+    /// bit of a Thumb function pointer is ignored.
+    pub address: u32,
+    /// The number of instructions to disassemble.
+    pub count: u32,
+    /// Whether the code is ARM rather than Thumb.
+    pub arm: bool,
+}
+
 /// The emulator operations a session needs.
 pub trait Machine {
     /// Sets the keys pressed while frames run.
@@ -131,6 +146,8 @@ pub trait Machine {
     /// Writes `value` at `address` with the given width, without the side
     /// effects a game's own write could have.
     fn write(&mut self, address: u32, width: Width, value: u32);
+    /// Decodes the instruction at `address` in the given mode.
+    fn disassemble(&mut self, address: u32, mode: Mode) -> Instruction;
     /// Adds a watchpoint on `address`, returning its id.
     fn add_watchpoint(&mut self, address: u32, kind: WatchKind) -> i64;
     /// Adds a breakpoint on the instruction at `address`, returning its id.
@@ -232,6 +249,7 @@ impl<M: Machine> Session<M> {
                     path.display()
                 ))
             }
+            Request::Dis(dis) => self.disassemble(*dis),
             Request::Watch { address, on } => {
                 let id = self.machine.add_watchpoint(*address, *on);
                 Ok(self.add_point(id, *address, PointKind::Watch(*on)))
@@ -258,6 +276,19 @@ impl<M: Machine> Session<M> {
             Request::Regs => Ok(self.machine.registers().to_string()),
             Request::Stop => Ok("Stopped the session".to_string()),
         }
+    }
+
+    /// Lists the instructions of a disassembly, one per line.
+    fn disassemble(&mut self, dis: Dis) -> Result<String, String> {
+        let (mut address, mode) =
+            disasm::start(dis.address, dis.arm).map_err(|err| err.to_string())?;
+        let mut lines = Vec::new();
+        for _ in 0..dis.count {
+            let instruction = self.machine.disassemble(address, mode);
+            lines.push(disasm::line(address, mode, &instruction));
+            address = address.wrapping_add(instruction.size);
+        }
+        Ok(lines.join("\n"))
     }
 
     /// Appends the hits recorded since the last command to `message`, if any
@@ -439,6 +470,20 @@ mod tests {
         fn write(&mut self, address: u32, width: Width, value: u32) {
             for (offset, byte) in (0..width.bytes()).zip(value.to_le_bytes()) {
                 self.memory.insert(address + offset, byte);
+            }
+        }
+
+        /// Decodes every Thumb address as a 2-byte instruction naming it, and
+        /// every ARM one as a 4-byte instruction.
+        fn disassemble(&mut self, address: u32, mode: Mode) -> Instruction {
+            let size = match mode {
+                Mode::Thumb => 2,
+                Mode::Arm => 4,
+            };
+            Instruction {
+                size,
+                opcode: address & 0xFFFF,
+                text: format!("op {address:08X}"),
             }
         }
 
@@ -663,6 +708,40 @@ mod tests {
                     path: dir.path().join("missing/ram.bin")
                 })
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn disassemble_thumb_code() {
+        let mut session = Session::new(FakeMachine::default());
+        assert_eq!(
+            session.handle(&Request::Dis(Dis {
+                address: 0x0804_FD09,
+                count: 2,
+                arm: false
+            })),
+            Ok("0804FD08: FD08       op 0804FD08\n0804FD0A: FD0A       op 0804FD0A".into())
+        );
+    }
+
+    #[test]
+    fn disassemble_arm_code() {
+        let mut session = Session::new(FakeMachine::default());
+        assert_eq!(
+            session.handle(&Request::Dis(Dis {
+                address: 0x0800_0000,
+                count: 2,
+                arm: true
+            })),
+            Ok("08000000: 00000000   op 08000000\n08000004: 00000004   op 08000004".into())
+        );
+        assert_eq!(
+            session.handle(&Request::Dis(Dis {
+                address: 0x0800_0002,
+                count: 1,
+                arm: true
+            })),
+            Err("ARM code starts at a multiple of 4, but 0x08000002 isn't one".into())
         );
     }
 

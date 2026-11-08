@@ -5,12 +5,13 @@
 //! coverage check.
 
 use crate::debug::{self, Access, Hit, Hits, Registers, WatchKind};
+use crate::disasm::{Instruction, Mode};
 use crate::keys::Keys;
 use crate::memory::Width;
 use crate::rom::Rom;
 use crate::screen::{HEIGHT, Screen};
 use crate::session::Machine;
-use std::ffi::c_void;
+use std::ffi::{CStr, c_char, c_void};
 use std::ptr::NonNull;
 
 /// The width in pixels of each row of mGBA's frame buffer.
@@ -63,6 +64,14 @@ unsafe extern "C" {
     ) -> *const RawHit;
     fn gbamod_emulator_clear_hits(emulator: *mut RawEmulator);
     fn gbamod_emulator_registers(emulator: *const RawEmulator, registers: *mut u32);
+    fn gbamod_emulator_disassemble(
+        emulator: *mut RawEmulator,
+        address: u32,
+        thumb: bool,
+        opcode: *mut u32,
+        text: *mut c_char,
+        size: usize,
+    ) -> u32;
     fn gbamod_emulator_load_state(
         emulator: *mut RawEmulator,
         state: *const c_void,
@@ -156,6 +165,30 @@ impl Machine for Emulator {
     fn write(&mut self, address: u32, width: Width, value: u32) {
         // SAFETY: `raw` is a live emulator owned by `self`.
         unsafe { gbamod_emulator_write(self.raw.as_ptr(), address, width.bytes(), value) };
+    }
+
+    fn disassemble(&mut self, address: u32, mode: Mode) -> Instruction {
+        let mut opcode = 0;
+        let mut text = [0 as c_char; 128];
+        // SAFETY: `raw` is a live emulator owned by `self`, and the shim
+        // writes a null-terminated string of at most `text.len()` bytes.
+        let size = unsafe {
+            gbamod_emulator_disassemble(
+                self.raw.as_ptr(),
+                address,
+                mode == Mode::Thumb,
+                &raw mut opcode,
+                text.as_mut_ptr(),
+                text.len(),
+            )
+        };
+        // SAFETY: the shim null-terminates `text`.
+        let text = unsafe { CStr::from_ptr(text.as_ptr()) };
+        Instruction {
+            size,
+            opcode,
+            text: text.to_string_lossy().into_owned(),
+        }
     }
 
     fn add_watchpoint(&mut self, address: u32, kind: WatchKind) -> i64 {
