@@ -1,6 +1,7 @@
 //! An emulator-driven toolkit for reverse engineering and patching GBA games.
 
 pub mod asm;
+pub mod build;
 pub mod debug;
 pub mod disasm;
 #[cfg(not(tarpaulin_include))]
@@ -17,8 +18,7 @@ pub mod search;
 pub mod session;
 
 use game::{Game, GameError};
-use patch::PatchError;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Describes the ROM of the game folder at `dir`, for the `info` command.
 ///
@@ -39,98 +39,6 @@ pub fn info(dir: &Path) -> Result<String, GameError> {
         header.version,
         rom.bytes.len(),
     ))
-}
-
-/// The reason the `build` command failed.
-#[derive(Debug, thiserror::Error)]
-pub enum BuildError {
-    /// The game folder or its ROM couldn't be read.
-    #[error(transparent)]
-    Game(#[from] GameError),
-    /// The manifest names no file to write.
-    #[error("the manifest names no output; add `rom` or `ips` under `[output]`")]
-    NoOutput,
-    /// An output file is the game's ROM.
-    #[error("the output `{}` is the game's ROM, which gbamod only reads", .0.display())]
-    OverwriteRom(PathBuf),
-    /// Some patches can't be applied to the ROM.
-    #[error("the patches can't be applied:\n{0}")]
-    Patch(#[from] PatchError),
-    /// An output file couldn't be written.
-    #[error("failed to write `{}`: {source}", path.display())]
-    Write {
-        /// The output file.
-        path: PathBuf,
-        /// The underlying I/O error.
-        source: std::io::Error,
-    },
-}
-
-/// Applies the manifest's patches to the ROM of the game folder at `dir` and
-/// writes the outputs it names, for the `build` command.
-///
-/// Nothing is written unless every patch can be applied, and the ROM itself
-/// is only read.
-///
-/// # Errors
-///
-/// Returns a [`BuildError`] if the game folder or its ROM can't be read, the
-/// manifest names no output or names the ROM as one, a patch can't be
-/// applied, or an output can't be written.
-pub fn build(dir: &Path) -> Result<String, BuildError> {
-    let game = Game::open(dir)?;
-    let manifest = &game.manifest;
-    let output = &manifest.output;
-    if output.rom.is_none() && output.ips.is_none() {
-        return Err(BuildError::NoOutput);
-    }
-    let rom_path = std::fs::canonicalize(game.rom_path()).ok();
-    if let Some(path) =
-        output.rom.iter().chain(&output.ips).find(|path| {
-            rom_path.is_some() && std::fs::canonicalize(dir.join(path)).ok() == rom_path
-        })
-    {
-        return Err(BuildError::OverwriteRom(path.clone()));
-    }
-    let rom = game.read_rom()?;
-    let patched = patch::apply(&rom.bytes, &manifest.patches)?;
-
-    let mut lines: Vec<String> = manifest
-        .patches
-        .iter()
-        .map(|patch| {
-            format!(
-                "Patched {} byte(s) at 0x{:08X}",
-                patch.bytes.len(),
-                patch.at
-            )
-        })
-        .collect();
-    if let Some(path) = &output.rom {
-        write_output(&dir.join(path), &patched)?;
-        lines.push(format!(
-            "Wrote {} ({} bytes)",
-            path.display(),
-            patched.len()
-        ));
-    }
-    if let Some(path) = &output.ips {
-        let ips = patch::ips(&patched, &manifest.patches);
-        write_output(&dir.join(path), &ips)?;
-        lines.push(format!("Wrote {} ({} bytes)", path.display(), ips.len()));
-    }
-    Ok(lines.join("\n"))
-}
-
-/// Writes an output file, creating the directories it's in.
-fn write_output(path: &Path, bytes: &[u8]) -> Result<(), BuildError> {
-    path.parent()
-        .map_or(Ok(()), std::fs::create_dir_all)
-        .and_then(|()| std::fs::write(path, bytes))
-        .map_err(|source| BuildError::Write {
-            path: path.to_path_buf(),
-            source,
-        })
 }
 
 /// The reason the `boot` command failed.
@@ -189,6 +97,9 @@ pub enum StartError {
     /// The game folder or its ROM couldn't be read.
     #[error(transparent)]
     Game(#[from] GameError),
+    /// The manifest's patches and hooks couldn't be applied to the ROM.
+    #[error(transparent)]
+    Build(#[from] build::BuildError),
     /// A session is already listening in the game folder.
     #[error("a session is already running in this folder")]
     AlreadyRunning,
@@ -203,16 +114,23 @@ pub enum StartError {
     Timeout,
 }
 
+/// The flag of [`SERVE_COMMAND`] that runs the ROM with the manifest's
+/// patches and hooks applied.
+pub const PATCHED_FLAG: &str = "patched";
+
 /// Launches a session for the game folder at `dir` in a background process,
 /// and waits until it's listening, for the `start` command.
+///
+/// If `patched` is set, the session runs the ROM with the manifest's patches
+/// and hooks applied.
 ///
 /// # Errors
 ///
 /// Returns a [`StartError`] if a session is already running, the game folder
-/// or its ROM can't be read, or the background process fails to start
-/// listening.
+/// or its ROM can't be read, the patches and hooks can't be applied, or the
+/// background process fails to start listening.
 #[cfg(not(tarpaulin_include))]
-pub fn start(dir: &Path) -> Result<String, StartError> {
+pub fn start(dir: &Path, patched: bool) -> Result<String, StartError> {
     use std::os::unix::net::UnixStream;
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
@@ -222,12 +140,21 @@ pub fn start(dir: &Path) -> Result<String, StartError> {
         return Err(StartError::AlreadyRunning);
     }
     // Check the ROM here, where errors can still be reported to the user.
-    Game::open(dir)?.read_rom()?;
+    let game = Game::open(dir)?;
+    if patched {
+        build::patched_rom(&game)?;
+    } else {
+        game.read_rom()?;
+    }
     // A socket left behind by a session that was killed is no longer in use.
     let _ = std::fs::remove_file(&socket);
 
-    let mut child = Command::new(std::env::current_exe()?)
-        .arg(SERVE_COMMAND)
+    let mut command = Command::new(std::env::current_exe()?);
+    command.arg(SERVE_COMMAND);
+    if patched {
+        command.arg(format!("--{PATCHED_FLAG}"));
+    }
+    let mut child = command
         .current_dir(dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -236,7 +163,15 @@ pub fn start(dir: &Path) -> Result<String, StartError> {
         .spawn()?;
     for _ in 0..200 {
         if UnixStream::connect(&socket).is_ok() {
-            return Ok(format!("Started a session (process {})", child.id()));
+            let rom = if patched {
+                "the patched ROM"
+            } else {
+                "the ROM"
+            };
+            return Ok(format!(
+                "Started a session on {rom} (process {})",
+                child.id()
+            ));
         }
         if let Some(status) = child.try_wait()? {
             return Err(StartError::Exited(status));
@@ -253,6 +188,9 @@ pub enum ServeError {
     /// The game folder or its ROM couldn't be read.
     #[error(transparent)]
     Game(#[from] GameError),
+    /// The manifest's patches and hooks couldn't be applied to the ROM.
+    #[error(transparent)]
+    Build(#[from] build::BuildError),
     /// The emulator couldn't load the ROM.
     #[error(transparent)]
     Load(#[from] emulator::LoadError),
@@ -264,13 +202,22 @@ pub enum ServeError {
 /// Runs a session for the game folder at `dir` until it's stopped, for the
 /// hidden subcommand that [`start`] launches.
 ///
+/// If `patched` is set, the session runs the ROM with the manifest's patches
+/// and hooks applied.
+///
 /// # Errors
 ///
 /// Returns a [`ServeError`] if the game folder or its ROM can't be read, the
-/// emulator can't load the ROM, or the session socket can't be created.
+/// patches and hooks can't be applied, the emulator can't load the ROM, or
+/// the session socket can't be created.
 #[cfg(not(tarpaulin_include))]
-pub fn serve(dir: &Path) -> Result<(), ServeError> {
-    let rom = Game::open(dir)?.read_rom()?;
+pub fn serve(dir: &Path, patched: bool) -> Result<(), ServeError> {
+    let game = Game::open(dir)?;
+    let rom = if patched {
+        build::patched_rom(&game)?.0
+    } else {
+        game.read_rom()?
+    };
     let emulator = emulator::Emulator::new(&rom)?;
     let socket = session::socket_path(dir);
     let listener = std::os::unix::net::UnixListener::bind(&socket)?;
@@ -286,123 +233,6 @@ mod tests {
     use super::*;
     use crate::rom::tests::valid_rom;
     use std::fs;
-
-    fn game_dir(manifest: &str) -> tempfile::TempDir {
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(
-            dir.path().join(manifest::FILE_NAME),
-            format!("version = 1\nrom = \"game.gba\"\n{manifest}"),
-        )
-        .unwrap();
-        fs::write(dir.path().join("game.gba"), valid_rom("TEST")).unwrap();
-        dir
-    }
-
-    const PATCHES: &str = "[[patch]]\n\
-        at = 0x08000100\n\
-        expect = \"00 00\"\n\
-        bytes = \"10 B5\"\n\
-        [[patch]]\n\
-        at = 0x08000004\n\
-        bytes = \"AA\"\n";
-
-    #[test]
-    fn build_patched_rom_and_ips() {
-        let dir = game_dir(&format!(
-            "[output]\nrom = \"out/mod.gba\"\nips = \"out/mod.ips\"\n{PATCHES}"
-        ));
-        assert_eq!(
-            build(dir.path()).unwrap(),
-            "Patched 2 byte(s) at 0x08000100\n\
-             Patched 1 byte(s) at 0x08000004\n\
-             Wrote out/mod.gba (512 bytes)\n\
-             Wrote out/mod.ips (21 bytes)"
-        );
-        let mut expected = valid_rom("TEST");
-        expected[0x100..0x102].copy_from_slice(&[0x10, 0xB5]);
-        expected[4] = 0xAA;
-        assert_eq!(fs::read(dir.path().join("out/mod.gba")).unwrap(), expected);
-        assert_eq!(
-            fs::read(dir.path().join("out/mod.ips")).unwrap(),
-            b"PATCH\x00\x01\x00\x00\x02\x10\xB5\x00\x00\x04\x00\x01\xAAEOF"
-        );
-        assert_eq!(
-            fs::read(dir.path().join("game.gba")).unwrap(),
-            valid_rom("TEST")
-        );
-    }
-
-    #[test]
-    fn build_only_ips() {
-        let dir = game_dir("[output]\nips = \"mod.ips\"\n");
-        assert_eq!(build(dir.path()).unwrap(), "Wrote mod.ips (8 bytes)");
-        assert_eq!(fs::read(dir.path().join("mod.ips")).unwrap(), b"PATCHEOF");
-    }
-
-    #[test]
-    fn reject_build_without_output() {
-        let dir = game_dir(PATCHES);
-        let err = build(dir.path()).unwrap_err();
-        assert!(matches!(err, BuildError::NoOutput));
-        assert_eq!(
-            err.to_string(),
-            "the manifest names no output; add `rom` or `ips` under `[output]`"
-        );
-    }
-
-    #[test]
-    fn reject_build_over_rom() {
-        let dir = game_dir("[output]\nrom = \"./game.gba\"\n");
-        let err = build(dir.path()).unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "the output `./game.gba` is the game's ROM, which gbamod only reads"
-        );
-        assert_eq!(
-            fs::read(dir.path().join("game.gba")).unwrap(),
-            valid_rom("TEST")
-        );
-    }
-
-    #[test]
-    fn reject_build_with_bad_patches() {
-        let dir = game_dir(
-            "[output]\nrom = \"mod.gba\"\n[[patch]]\nat = 0x08000100\nexpect = \"01\"\nbytes = \"02\"\n",
-        );
-        let err = build(dir.path()).unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "the patches can't be applied:\n\
-             patch 1 at 0x08000100: the byte at 0x08000100 is 0x00, not the expected 0x01"
-        );
-        assert!(!dir.path().join("mod.gba").exists());
-    }
-
-    #[test]
-    fn reject_build_with_missing_rom() {
-        let dir = game_dir("[output]\nrom = \"mod.gba\"\n");
-        fs::remove_file(dir.path().join("game.gba")).unwrap();
-        assert!(matches!(
-            build(dir.path()).unwrap_err(),
-            BuildError::Game(_)
-        ));
-        assert!(matches!(
-            build(Path::new("/nonexistent")).unwrap_err(),
-            BuildError::Game(_)
-        ));
-    }
-
-    #[test]
-    fn reject_unwritable_output() {
-        let dir = game_dir("[output]\nips = \"game.gba/mod.ips\"\n");
-        let err = build(dir.path()).unwrap_err();
-        let path = dir.path().join("game.gba/mod.ips");
-        assert!(
-            err.to_string()
-                .starts_with(&format!("failed to write `{}`: ", path.display())),
-            "{err}"
-        );
-    }
 
     #[test]
     fn describe_game_rom() {

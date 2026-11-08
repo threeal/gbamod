@@ -189,14 +189,34 @@ impl Program {
 /// Returns an [`AsmError`] if `origin` is odd, a line can't be assembled, or
 /// the code runs past the end of the address space.
 pub fn assemble(source: &str, origin: u32) -> Result<Program, AsmError> {
+    assemble_with(source, origin, &[])
+}
+
+/// Assembles Thumb code placed at `origin`, with `names` defined before its
+/// first line as if by `.equ`.
+///
+/// # Errors
+///
+/// Returns an [`AsmError`] if `origin` is odd, a line can't be assembled,
+/// including one that defines a name again, or the code runs past the end of
+/// the address space.
+pub fn assemble_with(
+    source: &str,
+    origin: u32,
+    names: &[(&str, u32)],
+) -> Result<Program, AsmError> {
     if !origin.is_multiple_of(2) {
         return Err(AsmError::OddOrigin(origin));
     }
+    let symbols = names
+        .iter()
+        .map(|&(name, value)| (name.to_string(), i64::from(value)))
+        .collect();
     let Layout {
         items,
         symbols,
         end,
-    } = layout(source, origin)?;
+    } = layout(source, origin, symbols)?;
     let (pool, pool_start) = pool(&items, &symbols, end)?;
     let mut literals = HashMap::new();
     let mut address = pool_start;
@@ -301,9 +321,12 @@ pub fn run(path: &Path, origin: u32) -> Result<String, AsmError> {
 
 /// Places each label, directive, and instruction at its address, and
 /// defines each label and constant.
-fn layout(source: &str, origin: u32) -> Result<Layout, AsmError> {
+fn layout(
+    source: &str,
+    origin: u32,
+    mut symbols: HashMap<String, i64>,
+) -> Result<Layout, AsmError> {
     let mut items = Vec::new();
-    let mut symbols = HashMap::new();
     let mut address = i64::from(origin);
     for (index, text) in source.lines().enumerate() {
         let line = index + 1;
@@ -944,6 +967,26 @@ Assembled 36 bytes at 0x08CBF000"
                 .unwrap_err()
                 .to_string(),
             "the code runs past the end of the address space"
+        );
+    }
+
+    #[test]
+    fn define_names_before_code() {
+        let program = assemble_with(
+            "ldr r3, =ORIGINAL\nbx r3",
+            0x0800_0000,
+            &[("ORIGINAL", 0x0804_FD09)],
+        )
+        .unwrap();
+        assert_eq!(
+            program.bytes,
+            [0x00, 0x4B, 0x18, 0x47, 0x09, 0xFD, 0x04, 0x08]
+        );
+        assert_eq!(
+            assemble_with("ORIGINAL: nop", 0x0800_0000, &[("ORIGINAL", 1)])
+                .unwrap_err()
+                .to_string(),
+            "line 1: `ORIGINAL` is already defined"
         );
     }
 

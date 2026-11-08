@@ -33,7 +33,9 @@ mod cli {
                     ),
             )
             .subcommand(
-                Command::new("start").about("Start an emulator session for the game folder"),
+                Command::new("start")
+                    .about("Start an emulator session for the game folder")
+                    .arg(patched_arg()),
             )
             .subcommand(Command::new("stop").about("Stop the game folder's emulator session"))
             .subcommand(
@@ -106,9 +108,13 @@ mod cli {
                     ),
             )
             .subcommand(Command::new("build").about(
-                "Apply the manifest's patches to the ROM and write the patched ROM and IPS patch",
+                "Apply the manifest's patches and hooks to the ROM and write the patched ROM and IPS patch",
             ))
-            .subcommand(Command::new(gbamod::SERVE_COMMAND).hide(true))
+            .subcommand(
+                Command::new(gbamod::SERVE_COMMAND)
+                    .hide(true)
+                    .arg(patched_arg()),
+            )
     }
 
     /// Runs the parsed command in the game folder at `dir`, returning its
@@ -126,10 +132,13 @@ mod cli {
                     .unwrap_or_default();
                 gbamod::boot(dir, frames(args), &screenshot).map_err(|err| err.to_string())
             }
-            Some(("start", _)) => gbamod::start(dir).map_err(|err| err.to_string()),
-            Some((gbamod::SERVE_COMMAND, _)) => gbamod::serve(dir)
-                .map(|()| String::new())
+            Some(("start", args)) => gbamod::start(dir, args.get_flag(gbamod::PATCHED_FLAG))
                 .map_err(|err| err.to_string()),
+            Some((gbamod::SERVE_COMMAND, args)) => {
+                gbamod::serve(dir, args.get_flag(gbamod::PATCHED_FLAG))
+                    .map(|()| String::new())
+                    .map_err(|err| err.to_string())
+            }
             Some(("stop", _)) => request(Request::Stop),
             Some(("run", args)) => request(Request::Run {
                 frames: frames(args),
@@ -179,7 +188,7 @@ mod cli {
                 let file = args.get_one::<PathBuf>("file").cloned().unwrap_or_default();
                 asm::run(&file, number(args, "at")).map_err(|err| err.to_string())
             }
-            Some(("build", _)) => gbamod::build(dir).map_err(|err| err.to_string()),
+            Some(("build", _)) => gbamod::build::run(dir).map_err(|err| err.to_string()),
             Some(("search", args)) => search(args),
             Some(("pixels", args)) => {
                 let position = |name| args.get_one::<usize>(name).copied().unwrap_or_default();
@@ -330,6 +339,13 @@ mod cli {
             .cloned()
             .collect();
         query.run(&dumps).map_err(|err| err.to_string())
+    }
+
+    fn patched_arg() -> Arg {
+        Arg::new(gbamod::PATCHED_FLAG)
+            .long(gbamod::PATCHED_FLAG)
+            .action(clap::ArgAction::SetTrue)
+            .help("Run the ROM with the manifest's patches and hooks applied in memory")
     }
 
     fn frames_arg() -> Arg {
