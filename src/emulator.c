@@ -12,6 +12,7 @@
 #include <mgba/debugger/debugger.h>
 #include <mgba/gba/core.h>
 #include <mgba/internal/arm/arm.h>
+#include <mgba/internal/arm/decoder.h>
 #include <mgba-util/vfs.h>
 
 #include <stdint.h>
@@ -286,4 +287,47 @@ void gbamod_emulator_registers(const struct gbamod_emulator* emulator, uint32_t 
 	}
 	registers[15] = instruction_address(cpu, 1);
 	registers[16] = cpu->cpsr.packed;
+}
+
+// Disassembles the instruction at `address`, as Thumb if `thumb` is set or
+// as ARM otherwise, writing its text into `text` and its encoding into
+// `opcode`. A Thumb `bl` is decoded with its second half as one instruction,
+// with the first half in the high 16 bits of `opcode`. Returns the size of
+// the instruction in bytes.
+uint32_t gbamod_emulator_disassemble(struct gbamod_emulator* emulator, uint32_t address, bool thumb, uint32_t* opcode, char* text, size_t size) {
+	struct mCore* core = emulator->core;
+	struct ARMCore* cpu = core->cpu;
+	// The disassembler reads literal pools through the bus, which fires any
+	// read watchpoint on them, so the hits it causes are dropped.
+	size_t kept_hits = emulator->kept_hits;
+	uint32_t total_hits = emulator->total_hits;
+	struct ARMInstructionInfo info;
+	uint32_t length;
+	if (thumb) {
+		uint16_t first = core->rawRead16(core, address, -1);
+		ARMDecodeThumb(first, &info);
+		*opcode = first;
+		length = 2;
+		if ((first & 0xF800) == 0xF000) {
+			uint16_t second = core->rawRead16(core, address + 2, -1);
+			struct ARMInstructionInfo second_info;
+			struct ARMInstructionInfo combined;
+			ARMDecodeThumb(second, &second_info);
+			if (ARMDecodeThumbCombine(&info, &second_info, &combined)) {
+				info = combined;
+				*opcode = ((uint32_t) first << 16) | second;
+				length = 4;
+			}
+		}
+		// Thumb's pc reads 4 bytes ahead of the instruction, even for a bl.
+		ARMDisassemble(&info, cpu, NULL, address + 4, text, (int) size);
+	} else {
+		*opcode = core->rawRead32(core, address, -1);
+		ARMDecodeARM(*opcode, &info);
+		length = 4;
+		ARMDisassemble(&info, cpu, NULL, address + 8, text, (int) size);
+	}
+	emulator->kept_hits = kept_hits;
+	emulator->total_hits = total_hits;
+	return length;
 }
