@@ -94,22 +94,7 @@ mod cli {
             .subcommand(search_command())
             .subcommand(pixels_command())
             .subcommands(debugger_commands())
-            .subcommand(
-                Command::new("asm")
-                    .about("Assemble a file of Thumb code placed at an address, and list it")
-                    .arg(
-                        arg!(<file> "The assembly file to read")
-                            .value_parser(value_parser!(PathBuf)),
-                    )
-                    .arg(
-                        arg!(--at <address> "The address the code starts at")
-                            .required(true)
-                            .value_parser(memory::parse_number),
-                    ),
-            )
-            .subcommand(Command::new("build").about(
-                "Apply the manifest's patches and hooks to the ROM and write the patched ROM and IPS patch",
-            ))
+            .subcommands(modding_commands())
             .subcommand(
                 Command::new(gbamod::SERVE_COMMAND)
                     .hide(true)
@@ -187,6 +172,9 @@ mod cli {
             Some(("asm", args)) => {
                 let file = args.get_one::<PathBuf>("file").cloned().unwrap_or_default();
                 asm::run(&file, number(args, "at")).map_err(|err| err.to_string())
+            }
+            Some(("refs", args)) => {
+                gbamod::refs::run(dir, number(args, "pointer")).map_err(|err| err.to_string())
             }
             Some(("build", _)) => gbamod::build::run(dir).map_err(|err| err.to_string()),
             Some(("search", args)) => search(args),
@@ -291,6 +279,28 @@ mod cli {
             Command::new("points").about("List the session's watchpoints and breakpoints"),
             Command::new("clear").about("Remove every watchpoint and breakpoint"),
             Command::new("regs").about("Print the CPU registers as they stand between frames"),
+        ]
+    }
+
+    fn modding_commands() -> [Command; 3] {
+        [
+            Command::new("asm")
+                .about("Assemble a file of Thumb code placed at an address, and list it")
+                .arg(arg!(<file> "The assembly file to read").value_parser(value_parser!(PathBuf)))
+                .arg(
+                    arg!(--at <address> "The address the code starts at")
+                        .required(true)
+                        .value_parser(memory::parse_number),
+                ),
+            Command::new("refs")
+                .about("List the words in the game folder's ROM that hold a pointer")
+                .arg(number_arg(
+                    "pointer",
+                    "The pointer to look for; its low bit is ignored, matching a Thumb function's address and pointers to it",
+                )),
+            Command::new("build").about(
+                "Apply the manifest's patches and hooks to the ROM and write the patched ROM and IPS patch",
+            ),
         ]
     }
 

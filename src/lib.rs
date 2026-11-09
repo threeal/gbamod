@@ -12,6 +12,7 @@ pub mod manifest;
 pub mod memory;
 pub mod patch;
 pub mod pixels;
+pub mod refs;
 pub mod rom;
 pub mod screen;
 pub mod search;
