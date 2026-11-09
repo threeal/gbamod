@@ -13,6 +13,8 @@ Never commit game data — ROMs, savestates, memory dumps, screenshots, notes, h
 During development, each game lives in its own folder under `.games/<game>/`, ignored by git, and the toolkit runs from inside it with `cargo run --`. The toolkit must never assume `.games/` exists; it works from the current directory or from paths it's given.
 Why: `.games/` is only a local convenience, and the released binary will run from game folders anywhere.
 
+The method for modding a game with gbamod, from finding a value to verifying the built mod, is in the `modding-games` skill.
+
 ## Emulator
 
 mGBA 0.10.3 is a git submodule in `third_party/mgba`, built by `build.rs` through CMake. Rust never calls mGBA directly: `src/emulator.c` is a C shim with a flat API, and `src/emulator.rs` binds to that shim. A new emulator capability means adding a shim function, not mirroring mGBA's structs in Rust. A struct the shim hands to Rust, like `struct gbamod_hit`, is mirrored field for field by a `#[repr(C)]` struct in `src/emulator.rs`, so a change to one needs the same change to the other.
