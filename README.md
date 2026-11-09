@@ -2,7 +2,7 @@
 
 An emulator-driven toolkit for reverse engineering and patching [GBA](https://en.wikipedia.org/wiki/Game_Boy_Advance) games. It drives an emulator headlessly to dump and diff memory, set watchpoints and breakpoints, and assemble hooks into [IPS](https://zerosoft.zophar.net/ips.php) patches.
 
-This project is at an early stage: so far it can read a game folder, check its ROM, and play it in the emulator through a background session, with savestates, screenshots, memory access, disassembly, watchpoints, and breakpoints. It can also search memory dumps for values, read pixels from screenshots, assemble Thumb code, and build a patched ROM and an IPS patch from byte patches and hooks.
+This project is at an early stage: so far it can read a game folder, check its ROM, and play it in the emulator through a background session, with savestates, screenshots, memory access, disassembly, watchpoints, and breakpoints. It can also search memory dumps for values, read pixels from screenshots, assemble Thumb code, find the words in a ROM that hold a pointer, and build a patched ROM and an IPS patch from byte patches and hooks.
 
 ## Usage
 
@@ -144,6 +144,12 @@ source = "hooks/guard.s"
 at = 0x08CBF080
 replaces = 0x0804FD09
 slots = [0x08CBC850, 0x08CBC9F0]
+```
+
+To find the slots, list the words in the ROM that hold the pointer. A Thumb function's address and the pointers to it differ only in the low bit, which is ignored, so either form finds both. The list ends with a `slots` line ready for the manifest:
+
+```sh
+gbamod refs 0x0804FD09
 ```
 
 The hook's code can call or jump to the pointer it replaces as `ORIGINAL`, such as `ldr r3, =ORIGINAL` followed by `bx r3`.
