@@ -5,6 +5,7 @@ use crate::game::{Game, GameError};
 use crate::manifest::{Hook, Manifest};
 use crate::patch::{self, Expect, Patch, PatchError};
 use crate::rom::Rom;
+use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
 /// The name a hook's code uses for the pointer it replaces.
@@ -25,6 +26,12 @@ pub enum BuildError {
     /// A hook has slots but no pointer for them to hold.
     #[error("hook `{}` has slots but no `replaces` pointer for them to hold", .0.display())]
     NoReplaces(PathBuf),
+    /// Code that isn't a hook couldn't be read or assembled.
+    #[error(transparent)]
+    Asm(#[from] AsmError),
+    /// Code to list has no address, given or from a hook.
+    #[error("`{}` isn't a hook in the manifest, so give the address it starts at with `--at`", .0.display())]
+    NoAddress(PathBuf),
     /// A hook's code couldn't be read or assembled.
     #[error("hook `{}`: {error}", file.display())]
     Hook {
@@ -70,7 +77,7 @@ pub fn patches(dir: &Path, manifest: &Manifest) -> Result<Vec<Patch>, BuildError
         patches.push(Patch {
             name: name.clone(),
             at: hook.at,
-            bytes: assemble(dir, hook)?,
+            bytes: assemble(dir, hook)?.bytes,
             expect: Expect::Free,
         });
         if hook.slots.is_empty() {
@@ -92,7 +99,7 @@ pub fn patches(dir: &Path, manifest: &Manifest) -> Result<Vec<Patch>, BuildError
 
 /// Assembles a hook's code at its address, with [`ORIGINAL`] defined as the
 /// pointer it replaces, if any.
-fn assemble(dir: &Path, hook: &Hook) -> Result<Vec<u8>, BuildError> {
+fn assemble(dir: &Path, hook: &Hook) -> Result<asm::Program, BuildError> {
     let error = |error| BuildError::Hook {
         file: hook.source.clone(),
         error,
@@ -105,8 +112,53 @@ fn assemble(dir: &Path, hook: &Hook) -> Result<Vec<u8>, BuildError> {
         .map(|value| (ORIGINAL, value))
         .into_iter()
         .collect();
-    let program = asm::assemble_with(&source, hook.at, &names).map_err(error)?;
-    Ok(program.bytes)
+    asm::assemble_with(&source, hook.at, &names).map_err(error)
+}
+
+/// Assembles the Thumb code in `file` and lists it, for the `asm` command.
+///
+/// If a hook in the manifest of the game folder at `dir` names `file`, the
+/// code is assembled the way [`run`] places it: at the hook's address unless
+/// `at` is given, with [`ORIGINAL`] defined as the pointer it replaces.
+/// Otherwise it's assembled at `at`, and `dir` needn't be a game folder.
+///
+/// # Errors
+///
+/// Returns a [`BuildError`] if the game folder has a manifest that can't be
+/// read, `file` isn't a hook and no `at` is given, or the code can't be read
+/// or assembled.
+pub fn list(dir: &Path, file: &Path, at: Option<u32>) -> Result<String, BuildError> {
+    match (find_hook(dir, file)?, at) {
+        (Some(hook), at) => {
+            let hook = Hook {
+                at: at.unwrap_or(hook.at),
+                ..hook
+            };
+            let mut report = assemble(dir, &hook)?.report();
+            let _ = write!(report, " for hook `{}`", hook.source.display());
+            if let Some(replaces) = hook.replaces {
+                let _ = write!(report, ", with {ORIGINAL} as 0x{replaces:08X}");
+            }
+            Ok(report)
+        }
+        (None, Some(at)) => Ok(asm::run(file, at)?),
+        (None, None) => Err(BuildError::NoAddress(file.to_path_buf())),
+    }
+}
+
+/// Returns the first hook in the manifest of the game folder at `dir` whose
+/// source is `file`, if the folder has a manifest.
+fn find_hook(dir: &Path, file: &Path) -> Result<Option<Hook>, BuildError> {
+    if !dir.join(crate::manifest::FILE_NAME).exists() {
+        return Ok(None);
+    }
+    let Ok(file) = std::fs::canonicalize(file) else {
+        return Ok(None);
+    };
+    let game = Game::open(dir)?;
+    Ok(game.manifest.hooks.into_iter().find(|hook| {
+        std::fs::canonicalize(dir.join(&hook.source)).is_ok_and(|source| source == file)
+    }))
 }
 
 /// Returns the game's ROM with its manifest's byte patches and hooks
@@ -385,6 +437,81 @@ mod tests {
             "the patches can't be applied:\n\
              hook `hook.s` at 0x0800017E: the byte at 0x08000180 is 0xFF, but free space is all 0xFF or all 0x00"
         );
+    }
+
+    #[test]
+    fn list_hook_as_built() {
+        let dir = game_dir(HOOK);
+        let hooks = dir.path().join("hooks");
+        fs::create_dir(&hooks).unwrap();
+        let guard = hooks.join("guard.s");
+        fs::write(&guard, GUARD).unwrap();
+
+        assert_eq!(
+            list(dir.path(), &guard, None).unwrap(),
+            "08000180: 4B00       ldr r3, =ORIGINAL\n\
+             08000182: 4718       bx r3\n\
+             08000184: 08000181   .word 0x08000181\n\
+             Assembled 8 bytes at 0x08000180 for hook `hooks/guard.s`, with ORIGINAL as 0x08000181"
+        );
+        assert!(
+            list(dir.path(), &guard, Some(0x0800_0200))
+                .unwrap()
+                .starts_with("08000200: 4B00       ldr r3, =ORIGINAL")
+        );
+
+        fs::write(&guard, "bx r16\n").unwrap();
+        assert_eq!(
+            list(dir.path(), &guard, None).unwrap_err().to_string(),
+            "hook `hooks/guard.s`: line 1: `bx` doesn't take these operands"
+        );
+    }
+
+    #[test]
+    fn list_hook_without_replaces() {
+        let dir = game_dir("[[hook]]\nsource = \"new.s\"\nat = 0x08000180\n");
+        let new = dir.path().join("new.s");
+        fs::write(&new, "bx lr\n").unwrap();
+        assert_eq!(
+            list(dir.path(), &new, None).unwrap(),
+            "08000180: 4770       bx lr\nAssembled 2 bytes at 0x08000180 for hook `new.s`"
+        );
+    }
+
+    #[test]
+    fn list_code_outside_manifest() {
+        let dir = game_dir(HOOK);
+        let other = dir.path().join("other.s");
+        fs::write(&other, "bx lr\n").unwrap();
+        assert_eq!(
+            list(dir.path(), &other, Some(0x0800_0000)).unwrap(),
+            "08000000: 4770       bx lr\nAssembled 2 bytes at 0x08000000"
+        );
+        assert_eq!(
+            list(dir.path(), &other, None).unwrap_err().to_string(),
+            format!(
+                "`{}` isn't a hook in the manifest, so give the address it starts at with `--at`",
+                other.display()
+            )
+        );
+        let missing = dir.path().join("missing.s");
+        assert!(matches!(
+            list(dir.path(), &missing, Some(0x0800_0000)),
+            Err(BuildError::Asm(AsmError::Read { .. }))
+        ));
+
+        let folder = tempfile::tempdir().unwrap();
+        assert!(list(folder.path(), &other, Some(0x0800_0000)).is_ok());
+        assert!(matches!(
+            list(folder.path(), &other, None),
+            Err(BuildError::NoAddress(_))
+        ));
+
+        fs::write(dir.path().join(manifest::FILE_NAME), "version = ").unwrap();
+        assert!(matches!(
+            list(dir.path(), &other, Some(0x0800_0000)),
+            Err(BuildError::Game(_))
+        ));
     }
 
     #[test]
