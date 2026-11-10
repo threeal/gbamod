@@ -5,7 +5,6 @@
 #[cfg(not(tarpaulin_include))]
 mod cli {
     use clap::{Arg, ArgMatches, Command, arg, value_parser};
-    use gbamod::asm;
     use gbamod::debug::{self, WatchKind};
     use gbamod::disasm;
     use gbamod::keys::Keys;
@@ -171,7 +170,8 @@ mod cli {
             Some(("regs", _)) => request(Request::Regs),
             Some(("asm", args)) => {
                 let file = args.get_one::<PathBuf>("file").cloned().unwrap_or_default();
-                asm::run(&file, number(args, "at")).map_err(|err| err.to_string())
+                gbamod::build::list(dir, &file, args.get_one::<u32>("at").copied())
+                    .map_err(|err| err.to_string())
             }
             Some(("refs", args)) => {
                 gbamod::refs::run(dir, number(args, "pointer")).map_err(|err| err.to_string())
@@ -285,11 +285,10 @@ mod cli {
     fn modding_commands() -> [Command; 3] {
         [
             Command::new("asm")
-                .about("Assemble a file of Thumb code placed at an address, and list it")
+                .about("Assemble a file of Thumb code and list it, the way the build places it if it's a hook")
                 .arg(arg!(<file> "The assembly file to read").value_parser(value_parser!(PathBuf)))
                 .arg(
-                    arg!(--at <address> "The address the code starts at")
-                        .required(true)
+                    arg!(--at <address> "The address the code starts at, required unless it's a hook in the manifest")
                         .value_parser(memory::parse_number),
                 ),
             Command::new("refs")

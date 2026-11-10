@@ -99,9 +99,9 @@ gbamod asm hook.s --at 0x08CBF000
 Instructions are written the way `dis` prints them, plus `push`, `pop`, and `nop`, so code can be copied from a disassembly:
 
 ```asm
-.equ ORIGINAL, 0x08006A79   @ name an address
+.equ TARGET, 0x08006A79     @ name an address
         push {r4, lr}
-        ldr r4, =ORIGINAL   @ load a 32-bit value from the literal pool
+        ldr r4, =TARGET     @ load a 32-bit value from the literal pool
         bl call_r4          @ branch to a label, or to an address such as 0x080BC778
         pop {r4}
         pop {r1}
@@ -152,7 +152,11 @@ To find the slots, list the words in the ROM that hold the pointer. A Thumb func
 gbamod refs 0x0804FD09
 ```
 
-The hook's code can call or jump to the pointer it replaces as `ORIGINAL`, such as `ldr r3, =ORIGINAL` followed by `bx r3`.
+The hook's code can call or jump to the pointer it replaces as `ORIGINAL`, such as `ldr r3, =ORIGINAL` followed by `bx r3`. To check the code before building, list it with `asm` and no `--at`, which places it at the hook's address with `ORIGINAL` defined, the way `build` does:
+
+```sh
+gbamod asm hooks/guard.s
+```
 
 To try the mod, start a session on the ROM with the patches and hooks applied in memory, then play it with the usual session commands:
 
