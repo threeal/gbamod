@@ -76,9 +76,10 @@ To find where the game keeps a value, dump the RAM at several moments, then sear
 gbamod search u16 dec before.bin after.bin                # values that fell, never rising
 gbamod search u16 seq=280,273 before.bin after.bin        # exact values per dump, * for any
 gbamod search u8 inc a.bin b.bin c.bin --min 1 --max 99   # values that rose, within a range
+gbamod search u8 distinct p1.bin,p2.bin ally.bin foe.bin  # one value per group, different in each
 ```
 
-The rules are `dec`, `inc`, `same`, `changed`, `eq=N`, and `seq=A,B,...`. Values are read little-endian at offsets aligned to their width, and each match prints its address and its value in every dump. A search lists the first 200 matches and counts the rest.
+The rules are `dec`, `inc`, `same`, `changed`, `distinct`, `eq=N`, and `seq=A,B,...`. Dumps joined by commas form a group, taken in the same state of the game: an address matches only when its value is the same across every dump of a group, and the rule then applies to one value per group, in order. Values are read little-endian at offsets aligned to their width, and each match prints its address and its value in every group. A search lists the first 200 matches and counts the rest.
 
 To check what a change did on screen, read pixels from a screenshot. Each pixel prints as a color token of three hex digits, the top 4 bits of its red, green, and blue, such as `0ce`:
 

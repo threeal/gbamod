@@ -10,7 +10,7 @@ mod cli {
     use gbamod::keys::Keys;
     use gbamod::memory::{self, Width};
     use gbamod::pixels::{self, Area, Token};
-    use gbamod::search::{Query, Rule};
+    use gbamod::search::{Group, Query, Rule};
     use gbamod::session::{self, Dis, Poke, Request};
     use std::path::{Path, PathBuf};
 
@@ -202,19 +202,19 @@ mod cli {
                     .value_parser(value_parser!(Width)),
             )
             .arg(
-                arg!(<rule> "How the values change across the dumps: dec, inc, same, changed, eq=N, or seq=A,B,... with * for any")
+                arg!(<rule> "How the values change across the groups: dec, inc, same, changed, distinct, eq=N, or seq=A,B,... with * for any")
                     .value_parser(value_parser!(Rule)),
             )
             .arg(
-                arg!(<dumps> ... "The RAM dumps, in the order they were taken")
-                    .value_parser(value_parser!(PathBuf)),
+                arg!(<dumps> ... "The RAM dumps, in the order they were taken; join dumps taken in the same state with commas, such as a.bin,b.bin, to require the same value across them")
+                    .value_parser(value_parser!(Group)),
             )
             .arg(
-                arg!(--min <value> "The smallest value allowed in every dump")
+                arg!(--min <value> "The smallest value allowed in every group")
                     .value_parser(memory::parse_number),
             )
             .arg(
-                arg!(--max <value> "The largest value allowed in every dump")
+                arg!(--max <value> "The largest value allowed in every group")
                     .value_parser(memory::parse_number),
             )
     }
@@ -342,8 +342,8 @@ mod cli {
             min: args.get_one::<u32>("min").copied().unwrap_or(0),
             max: args.get_one::<u32>("max").copied().unwrap_or(u32::MAX),
         };
-        let dumps: Vec<PathBuf> = args
-            .get_many::<PathBuf>("dumps")
+        let dumps: Vec<Group> = args
+            .get_many::<Group>("dumps")
             .unwrap_or_default()
             .cloned()
             .collect();
