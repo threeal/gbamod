@@ -12,7 +12,7 @@ Why: a later session, or a later feature, starts from these notes instead of red
 
 ## Finding a Value
 
-1. Save a savestate just before the value changes, so every experiment starts from the same frame.
+1. Save a savestate just before the value changes, so every experiment starts from the same frame. To reach a moment that takes long or varies, such as the next turn or the end of a fight, run with `--until` on a value already known, and `--keys` for input that repeats, rather than polling or looping single commands.
 2. Read the value off the screen when it's shown as a bar: `pixels shot.png X Y W 1 --count TOKEN` gives the bar's length in pixels, which tracks the value even when no number is shown.
 3. Dump the RAM at several moments where the value is known to have changed, or not, and `search` across the dumps. `seq=` with exact values narrows fastest; `dec`, `inc`, and `same` work when only the direction is known. When the value marks a state, such as whose turn it is, take several dumps in each state, join each state's dumps with commas, and search with `distinct`: the value must hold still within a state and differ between them. Add dumps until a handful of addresses remain.
 4. Confirm each candidate by poking it, running on, and comparing against the same run without the poke, from the same savestate. A value that changes the right way in the dumps is often only a copy, such as the one the HUD draws from, and a poke to it gets overwritten or changes nothing in play.

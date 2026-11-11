@@ -2,6 +2,7 @@
 
 pub mod asm;
 pub mod build;
+pub mod condition;
 pub mod debug;
 pub mod disasm;
 #[cfg(not(tarpaulin_include))]
