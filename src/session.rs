@@ -4,9 +4,10 @@
 //! [`SOCKET_NAME`] there. Each command connects, sends one [`Request`] as a
 //! line of JSON, and reads back one line holding the result.
 
+use crate::condition::{Condition, Test};
 use crate::debug::{self, Hits, Point, PointKind, Registers, WatchKind};
 use crate::disasm::{self, Instruction, Mode};
-use crate::keys::Keys;
+use crate::keys::{Keys, Pattern};
 use crate::memory::{self, Width};
 use crate::screen::Screen;
 use std::io::{self, BufRead, BufReader, Write};
@@ -30,11 +31,9 @@ pub fn socket_path(dir: &Path) -> PathBuf {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "command", rename_all = "lowercase")]
 pub enum Request {
-    /// Runs frames with the held keys pressed.
-    Run {
-        /// The number of frames to run.
-        frames: u32,
-    },
+    /// Runs frames with the held keys pressed, or a pattern of keys, until
+    /// the frames run out or a condition holds.
+    Run(Run),
     /// Sets the keys that stay pressed while frames run.
     Hold {
         /// The keys to hold.
@@ -100,6 +99,20 @@ pub enum Request {
     Regs,
     /// Ends the session.
     Stop,
+}
+
+/// Frames to run, and what to press and stop at while they run.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Run {
+    /// The most frames to run.
+    pub frames: u32,
+    /// A condition checked after each frame, which stops the run once it
+    /// holds.
+    #[serde(default)]
+    pub until: Option<Condition>,
+    /// Keys pressed in turn instead of the held keys.
+    #[serde(default)]
+    pub keys: Option<Pattern>,
 }
 
 /// A value to write to memory.
@@ -186,14 +199,7 @@ impl<M: Machine> Session<M> {
     /// written, or a savestate is rejected.
     pub fn handle(&mut self, request: &Request) -> Result<String, String> {
         match request {
-            Request::Run { frames } => {
-                self.machine.set_keys(self.held);
-                self.machine.run_frames(*frames);
-                Ok(self.with_hits(format!(
-                    "Ran {frames} frames, now at frame {}",
-                    self.machine.frame()
-                )))
-            }
+            Request::Run(run) => self.run(run),
             Request::Hold { keys } => {
                 self.held = *keys;
                 Ok(format!("Holding {keys}"))
@@ -278,6 +284,64 @@ impl<M: Machine> Session<M> {
         }
     }
 
+    /// Runs up to the run's frames, pressing its keys or else the held keys,
+    /// and stops after the first frame where its condition holds.
+    fn run(&mut self, run: &Run) -> Result<String, String> {
+        let frames = run.frames;
+        let until = run.until.as_ref();
+        let pattern = run.keys.as_ref();
+        if until.is_none() && pattern.is_none() {
+            self.machine.set_keys(self.held);
+            self.machine.run_frames(frames);
+            return Ok(self.with_hits(format!(
+                "Ran {frames} frames, now at frame {}",
+                self.machine.frame()
+            )));
+        }
+        if let Some(condition) = until
+            && let Test::Equals(number) = condition.test
+        {
+            condition
+                .width
+                .check(number)
+                .map_err(|err| err.to_string())?;
+        }
+        let start = until.map(|condition| self.read_value(condition));
+        let mut ran = 0;
+        let mut stopped = None;
+        while ran < frames {
+            self.machine
+                .set_keys(pattern.map_or(self.held, |pattern| pattern.keys_at(ran)));
+            self.machine.run_frames(1);
+            ran += 1;
+            if let (Some(condition), Some(start)) = (until, start) {
+                let value = self.read_value(condition);
+                if condition.test.holds(start, value) {
+                    stopped = Some(value);
+                    break;
+                }
+            }
+        }
+        self.machine.set_keys(self.held);
+        let mut message = format!("Ran {ran} frames, now at frame {}", self.machine.frame());
+        if let (Some(condition), Some(start)) = (until, start) {
+            message.push_str("; ");
+            message.push_str(&describe_stop(condition, start, stopped));
+        }
+        Ok(self.with_hits(message))
+    }
+
+    /// Reads the value a condition is on.
+    fn read_value(&self, condition: &Condition) -> u32 {
+        let bytes: Vec<u8> = (0..condition.width.bytes())
+            .map(|offset| {
+                self.machine
+                    .read_byte(condition.address.wrapping_add(offset))
+            })
+            .collect();
+        condition.width.read(&bytes)
+    }
+
     /// Lists the instructions of a disassembly, one per line.
     fn disassemble(&mut self, dis: Dis) -> Result<String, String> {
         let (mut address, mode) =
@@ -333,6 +397,27 @@ impl<M: Machine> Session<M> {
             poke.width.format(value),
             poke.address
         ))
+    }
+}
+
+/// Describes how a run with a condition ended: on the value that made it
+/// hold, or with `None` when the frames ran out first.
+fn describe_stop(condition: &Condition, start: u32, stopped: Option<u32>) -> String {
+    let address = condition.address;
+    let format = |value| condition.width.format(value);
+    match (condition.test, stopped) {
+        (Test::Equals(_), Some(value)) => format!("0x{address:08X} is {}", format(value)),
+        (Test::Equals(number), None) => {
+            format!("0x{address:08X} never became {}", format(number))
+        }
+        (Test::Changed, Some(value)) => format!(
+            "0x{address:08X} changed from {} to {}",
+            format(start),
+            format(value)
+        ),
+        (Test::Changed, None) => {
+            format!("0x{address:08X} never changed from {}", format(start))
+        }
     }
 }
 
@@ -423,6 +508,9 @@ mod tests {
         current_keys: Keys,
         state: Vec<u8>,
         memory: std::collections::HashMap<u32, u8>,
+        /// Bytes the game writes once a frame is reached, as frame, address,
+        /// and value.
+        changes: Vec<(u32, u32, u8)>,
         points: Vec<i64>,
         next_point: i64,
         hits: Hits,
@@ -436,6 +524,11 @@ mod tests {
         fn run_frames(&mut self, frames: u32) {
             self.keys.push((self.current_keys, frames));
             self.frame += frames;
+            for &(frame, address, value) in &self.changes {
+                if frame <= self.frame {
+                    self.memory.insert(address, value);
+                }
+            }
         }
 
         fn frame(&self) -> u32 {
@@ -520,18 +613,115 @@ mod tests {
         text.parse().unwrap()
     }
 
+    fn run(frames: u32) -> Request {
+        Request::Run(Run {
+            frames,
+            until: None,
+            keys: None,
+        })
+    }
+
+    fn run_until(frames: u32, condition: &str, width: Width) -> Request {
+        let mut until: Condition = condition.parse().unwrap();
+        until.width = width;
+        Request::Run(Run {
+            frames,
+            until: Some(until),
+            keys: None,
+        })
+    }
+
+    /// Returns a session whose game writes `value` at `address` on `frame`.
+    fn session_changing(frame: u32, address: u32, value: u8) -> Session<FakeMachine> {
+        Session::new(FakeMachine {
+            changes: vec![(frame, address, value)],
+            ..FakeMachine::default()
+        })
+    }
+
+    #[test]
+    fn run_until_value_equals() {
+        let mut session = session_changing(5, 0x0201_6BA9, 0);
+        session.handle(&Request::Hold { keys: keys("A") }).unwrap();
+        assert_eq!(
+            session.handle(&run_until(100, "0x02016BA9=0", Width::U8)),
+            Ok("Ran 5 frames, now at frame 5; 0x02016BA9 is 0x00".into())
+        );
+        assert_eq!(session.machine.keys, vec![(keys("A"), 1); 5]);
+    }
+
+    #[test]
+    fn run_until_value_never_equals() {
+        let mut session = session_changing(50, 0x0201_6BA9, 0);
+        assert_eq!(
+            session.handle(&run_until(10, "0x02016BA9=0", Width::U8)),
+            Ok("Ran 10 frames, now at frame 10; 0x02016BA9 never became 0x00".into())
+        );
+    }
+
+    #[test]
+    fn run_until_value_changes() {
+        let mut session = session_changing(3, 0x0200_316C, 0x11);
+        assert_eq!(
+            session.handle(&run_until(100, "0x0200316C=changed", Width::U16)),
+            Ok("Ran 3 frames, now at frame 3; 0x0200316C changed from 0x6D6C to 0x6D11".into())
+        );
+        assert_eq!(
+            session.handle(&run_until(4, "0x0200316C=changed", Width::U16)),
+            Ok("Ran 4 frames, now at frame 7; 0x0200316C never changed from 0x6D11".into())
+        );
+    }
+
+    #[test]
+    fn reject_condition_value_too_wide() {
+        let mut session = Session::new(FakeMachine::default());
+        assert_eq!(
+            session.handle(&run_until(10, "0x02016BA9=0x100", Width::U8)),
+            Err("value 0x100 doesn't fit in 8 bits".into())
+        );
+        assert_eq!(session.machine.frame, 0);
+    }
+
+    #[test]
+    fn run_with_key_pattern() {
+        let mut session = Session::new(FakeMachine::default());
+        session.handle(&Request::Hold { keys: keys("UP") }).unwrap();
+        assert_eq!(
+            session.handle(&Request::Run(Run {
+                frames: 5,
+                until: None,
+                keys: Some("B:2,none:1".parse().unwrap()),
+            })),
+            Ok("Ran 5 frames, now at frame 5".into())
+        );
+        let pressed: Vec<Keys> = session.machine.keys.iter().map(|(keys, _)| *keys).collect();
+        assert_eq!(
+            pressed,
+            [keys("B"), keys("B"), Keys::NONE, keys("B"), keys("B")]
+        );
+        assert_eq!(session.machine.current_keys, keys("UP"));
+    }
+
+    #[test]
+    fn run_old_requests_without_conditions() {
+        assert_eq!(
+            serde_json::from_str::<Request>(r#"{"command":"run","frames":3}"#).unwrap(),
+            run(3)
+        );
+    }
+
     #[test]
     fn run_with_held_keys() {
         let mut session = Session::new(FakeMachine::default());
         assert_eq!(
-            session.handle(&Request::Run { frames: 10 }),
+            session.handle(&run(10)),
             Ok("Ran 10 frames, now at frame 10".into())
         );
         assert_eq!(
             session.handle(&Request::Hold { keys: keys("A+UP") }),
             Ok("Holding A+UP".into())
         );
-        session.handle(&Request::Run { frames: 5 }).unwrap();
+        session.handle(&run(5)).unwrap();
         assert_eq!(
             session.machine.keys,
             vec![(Keys::NONE, 10), (keys("A+UP"), 5)]
@@ -560,13 +750,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.st");
         let mut session = Session::new(FakeMachine::default());
-        session.handle(&Request::Run { frames: 42 }).unwrap();
+        session.handle(&run(42)).unwrap();
 
         assert_eq!(
             session.handle(&Request::Save { path: path.clone() }),
             Ok(format!("Saved the state to {}", path.display()))
         );
-        session.handle(&Request::Run { frames: 8 }).unwrap();
+        session.handle(&run(8)).unwrap();
         assert_eq!(
             session.handle(&Request::Load { path: path.clone() }),
             Ok(format!(
@@ -797,7 +987,7 @@ mod tests {
         let mut session = Session::new(FakeMachine::default());
         session.machine.hits.total = 3;
         assert_eq!(
-            session.handle(&Request::Run { frames: 1 }),
+            session.handle(&run(1)),
             Ok("Ran 1 frames, now at frame 1".into())
         );
 
@@ -808,7 +998,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            session.handle(&Request::Run { frames: 1 }),
+            session.handle(&run(1)),
             Ok("Ran 1 frames, now at frame 2\nNo hits".into())
         );
         session.machine.hits.total = 3;
@@ -854,7 +1044,7 @@ mod tests {
         });
 
         assert_eq!(
-            send(&socket, &Request::Run { frames: 3 }).unwrap(),
+            send(&socket, &run(3)).unwrap(),
             "Ran 3 frames, now at frame 3"
         );
         let err = send(

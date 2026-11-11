@@ -5,13 +5,14 @@
 #[cfg(not(tarpaulin_include))]
 mod cli {
     use clap::{Arg, ArgMatches, Command, arg, value_parser};
+    use gbamod::condition::Condition;
     use gbamod::debug::{self, WatchKind};
     use gbamod::disasm;
-    use gbamod::keys::Keys;
+    use gbamod::keys::{Keys, Pattern};
     use gbamod::memory::{self, Width};
     use gbamod::pixels::{self, Area, Token};
     use gbamod::search::{Group, Query, Rule};
-    use gbamod::session::{self, Dis, Poke, Request};
+    use gbamod::session::{self, Dis, Poke, Request, Run};
     use std::path::{Path, PathBuf};
 
     /// Defines the command line.
@@ -40,7 +41,20 @@ mod cli {
             .subcommand(
                 Command::new("run")
                     .about("Run frames in the session with the held keys pressed")
-                    .arg(frames_arg()),
+                    .arg(arg!(<frames> "The most frames to run").value_parser(value_parser!(u32)))
+                    .arg(
+                        arg!(--until <condition> "Stop after the first frame where a value in memory holds: ADDRESS=VALUE, or ADDRESS=changed")
+                            .value_parser(value_parser!(Condition)),
+                    )
+                    .arg(
+                        arg!(--width <width> "The width of the value --until reads: u8, u16, or u32")
+                            .value_parser(value_parser!(Width))
+                            .default_value("u8"),
+                    )
+                    .arg(
+                        arg!(--keys <pattern> "Press keys in turn instead of the held ones, such as B:4,none:4 for B held 4 frames and released 4, repeating")
+                            .value_parser(value_parser!(Pattern)),
+                    ),
             )
             .subcommand(
                 Command::new("hold")
@@ -124,9 +138,14 @@ mod cli {
                     .map_err(|err| err.to_string())
             }
             Some(("stop", _)) => request(Request::Stop),
-            Some(("run", args)) => request(Request::Run {
+            Some(("run", args)) => request(Request::Run(Run {
                 frames: frames(args),
-            }),
+                until: args.get_one::<Condition>("until").map(|until| Condition {
+                    width: args.get_one::<Width>("width").copied().unwrap_or(Width::U8),
+                    ..*until
+                }),
+                keys: args.get_one::<Pattern>("keys").cloned(),
+            })),
             Some(("hold", args)) => request(Request::Hold { keys: keys(args) }),
             Some(("tap", args)) => request(Request::Tap {
                 keys: keys(args),

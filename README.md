@@ -38,6 +38,16 @@ gbamod shot title.png  # save the screen as a PNG
 gbamod stop
 ```
 
+A run can also stop at a moment in the game instead of after a set number of frames, and press keys in turn instead of the held ones:
+
+```sh
+gbamod run 6000 --until 0x02016BA9=0                 # stop after the first frame where the byte is 0
+gbamod run 600 --until 0x0200316C=changed --width u16 # stop once the halfword changes
+gbamod run 3600 --keys B:4,none:4                    # press B for 4 frames, release for 4, repeating
+```
+
+The condition is checked after every frame, and the run reports where it stopped and the value it saw, or that the frames ran out first. `--width` sets the width of the value, a u8 by default, and both options can be given together.
+
 While a session runs, read and write its memory. Addresses and values are decimal, or hex with a `0x` prefix:
 
 ```sh
