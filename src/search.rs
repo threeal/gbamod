@@ -1,6 +1,12 @@
 //! Searching RAM dumps for values that changed across them in a known way.
+//!
+//! Dumps come in groups, each taken in the same state of the game. An address
+//! matches only when its value is the same across every dump in a group, and
+//! the rule then applies to the one value of each group, in order. A group of
+//! one dump is a dump on its own.
 
 use crate::memory::{self, MemoryError, Width};
+use std::convert::Infallible;
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -8,20 +14,22 @@ use std::str::FromStr;
 /// The most matches a search lists before it only counts the rest.
 pub const MAX_LISTED: usize = 200;
 
-/// How a value must change across the dumps, in order, to match.
+/// How a value must change across the groups of dumps, in order, to match.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Rule {
     /// Never rises, and falls at least once.
     Dec,
     /// Never falls, and rises at least once.
     Inc,
-    /// Equal in every dump.
+    /// Equal in every group.
     Same,
-    /// Differs between the first and last dump.
+    /// Differs between the first and last group.
     Changed,
-    /// Equal to the number in every dump.
+    /// Differs between every two groups.
+    Distinct,
+    /// Equal to the number in every group.
     Eq(u32),
-    /// Equal to each number in the dump at the same position, where `None`
+    /// Equal to each number in the group at the same position, where `None`
     /// matches anything.
     Seq(Vec<Option<u32>>),
 }
@@ -30,18 +38,18 @@ pub enum Rule {
 #[derive(Debug, thiserror::Error)]
 pub enum SearchError {
     /// The text isn't a known rule.
-    #[error("unknown rule `{0}`; expected dec, inc, same, changed, eq=N, or seq=A,B,...")]
+    #[error("unknown rule `{0}`; expected dec, inc, same, changed, distinct, eq=N, or seq=A,B,...")]
     UnknownRule(String),
     /// A number in the rule isn't valid.
     #[error(transparent)]
     Number(#[from] MemoryError),
-    /// A `seq` rule doesn't list one value per dump.
-    #[error("a seq rule needs one value per dump, but lists {values} for {dumps}")]
+    /// A `seq` rule doesn't list one value per group of dumps.
+    #[error("a seq rule needs one value per group of dumps, but lists {values} for {groups}")]
     SeqLength {
         /// The number of values the rule lists.
         values: usize,
-        /// The number of dumps.
-        dumps: usize,
+        /// The number of groups.
+        groups: usize,
     },
     /// A dump couldn't be read.
     #[error("failed to read `{}`: {source}", path.display())]
@@ -62,7 +70,7 @@ pub enum SearchError {
 }
 
 impl Rule {
-    /// Returns whether the values, one per dump in order, follow this rule.
+    /// Returns whether the values, one per group in order, follow this rule.
     #[must_use]
     pub fn matches(&self, values: &[u32]) -> bool {
         let (Some(&first), Some(&last)) = (values.first(), values.last()) else {
@@ -73,6 +81,10 @@ impl Rule {
             Self::Inc => values.windows(2).all(|pair| pair[1] >= pair[0]) && last > first,
             Self::Same => values.iter().all(|&value| value == first),
             Self::Changed => last != first,
+            Self::Distinct => values
+                .iter()
+                .enumerate()
+                .all(|(index, value)| !values[..index].contains(value)),
             Self::Eq(number) => values.iter().all(|value| value == number),
             Self::Seq(wanted) => wanted
                 .iter()
@@ -105,8 +117,22 @@ impl FromStr for Rule {
             "inc" => Ok(Self::Inc),
             "same" => Ok(Self::Same),
             "changed" => Ok(Self::Changed),
+            "distinct" => Ok(Self::Distinct),
             _ => Err(SearchError::UnknownRule(text.to_string())),
         }
+    }
+}
+
+/// The paths of a group of RAM dumps taken in the same state of the game.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Group(pub Vec<PathBuf>);
+
+impl FromStr for Group {
+    type Err = Infallible;
+
+    /// Parses the paths of a group joined by commas, such as `a.bin,b.bin`.
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        Ok(Self(text.split(',').map(PathBuf::from).collect()))
     }
 }
 
@@ -115,11 +141,11 @@ impl FromStr for Rule {
 pub struct Query {
     /// The width of the values, read little-endian at aligned offsets.
     pub width: Width,
-    /// How the values must change across the dumps.
+    /// How the values must change across the groups of dumps.
     pub rule: Rule,
-    /// The smallest value allowed in every dump.
+    /// The smallest value allowed in every group.
     pub min: u32,
-    /// The largest value allowed in every dump.
+    /// The largest value allowed in every group.
     pub max: u32,
 }
 
@@ -128,25 +154,25 @@ pub struct Query {
 pub struct Match {
     /// The address the values were read from.
     pub address: u32,
-    /// The value at the address in each dump, in order.
+    /// The value at the address in each group, in order.
     pub values: Vec<u32>,
 }
 
 impl Query {
-    /// Returns every address whose values in `dumps` stay within range and
-    /// follow the rule. Each dump must be laid out as
-    /// [`memory::ram_addresses`].
+    /// Returns every address whose value is the same across each group of
+    /// `groups`, and whose values, one per group, stay within range and follow
+    /// the rule. Each dump must be laid out as [`memory::ram_addresses`].
     #[must_use]
-    pub fn find(&self, dumps: &[Vec<u8>]) -> Vec<Match> {
+    pub fn find(&self, groups: &[Vec<Vec<u8>>]) -> Vec<Match> {
         let width = self.width.bytes() as usize;
         memory::ram_addresses()
             .enumerate()
             .step_by(width)
             .filter_map(|(offset, address)| {
-                let values: Vec<u32> = dumps
+                let values = groups
                     .iter()
-                    .map(|dump| self.width.read(dump.get(offset..).unwrap_or_default()))
-                    .collect();
+                    .map(|dumps| self.group_value(dumps, offset))
+                    .collect::<Option<Vec<u32>>>()?;
                 let in_range = values
                     .iter()
                     .all(|value| (self.min..=self.max).contains(value));
@@ -155,25 +181,35 @@ impl Query {
             .collect()
     }
 
-    /// Reads the RAM dumps at `paths` and lists the addresses that match, for
+    /// Returns the value at `offset` if it's the same in every dump of a
+    /// group, and `None` if it differs or the group is empty.
+    fn group_value(&self, dumps: &[Vec<u8>], offset: usize) -> Option<u32> {
+        let mut values = dumps
+            .iter()
+            .map(|dump| self.width.read(dump.get(offset..).unwrap_or_default()));
+        let first = values.next()?;
+        values.all(|value| value == first).then_some(first)
+    }
+
+    /// Reads the groups of RAM dumps and lists the addresses that match, for
     /// the `search` command.
     ///
     /// # Errors
     ///
     /// Returns a [`SearchError`] if a dump can't be read or isn't the size of
-    /// a RAM dump, or a `seq` rule doesn't list one value per dump.
-    pub fn run(&self, paths: &[PathBuf]) -> Result<String, SearchError> {
+    /// a RAM dump, or a `seq` rule doesn't list one value per group.
+    pub fn run(&self, groups: &[Group]) -> Result<String, SearchError> {
         if let Rule::Seq(wanted) = &self.rule
-            && wanted.len() != paths.len()
+            && wanted.len() != groups.len()
         {
             return Err(SearchError::SeqLength {
                 values: wanted.len(),
-                dumps: paths.len(),
+                groups: groups.len(),
             });
         }
-        let dumps = paths
+        let dumps = groups
             .iter()
-            .map(|path| read_dump(path))
+            .map(|Group(paths)| paths.iter().map(|path| read_dump(path)).collect())
             .collect::<Result<Vec<_>, _>>()?;
         Ok(report(&self.find(&dumps)))
     }
@@ -255,6 +291,7 @@ mod tests {
         assert_eq!("inc".parse::<Rule>().unwrap(), Rule::Inc);
         assert_eq!("same".parse::<Rule>().unwrap(), Rule::Same);
         assert_eq!("changed".parse::<Rule>().unwrap(), Rule::Changed);
+        assert_eq!("distinct".parse::<Rule>().unwrap(), Rule::Distinct);
         assert_eq!("eq=0x120".parse::<Rule>().unwrap(), Rule::Eq(288));
         assert_eq!(
             "seq=288,*,273".parse::<Rule>().unwrap(),
@@ -266,7 +303,7 @@ mod tests {
     fn reject_invalid_rules() {
         assert_eq!(
             "down".parse::<Rule>().unwrap_err().to_string(),
-            "unknown rule `down`; expected dec, inc, same, changed, eq=N, or seq=A,B,..."
+            "unknown rule `down`; expected dec, inc, same, changed, distinct, eq=N, or seq=A,B,..."
         );
         assert!(matches!(
             "eq=lots".parse::<Rule>(),
@@ -290,6 +327,8 @@ mod tests {
         assert!(!Rule::Same.matches(&[5, 6, 5]));
         assert!(Rule::Changed.matches(&[5, 5, 6]));
         assert!(!Rule::Changed.matches(&[5, 6, 5]));
+        assert!(Rule::Distinct.matches(&[0, 1, 2]));
+        assert!(!Rule::Distinct.matches(&[0, 1, 0]));
         assert!(Rule::Eq(7).matches(&[7, 7]));
         assert!(!Rule::Eq(7).matches(&[7, 8]));
         let seq = Rule::Seq(vec![Some(1), None, Some(3)]);
@@ -299,10 +338,22 @@ mod tests {
     }
 
     #[test]
+    fn parse_groups() {
+        assert_eq!(
+            "a.bin".parse::<Group>().unwrap(),
+            Group(vec![PathBuf::from("a.bin")])
+        );
+        assert_eq!(
+            "a.bin,b.bin".parse::<Group>().unwrap(),
+            Group(vec![PathBuf::from("a.bin"), PathBuf::from("b.bin")])
+        );
+    }
+
+    #[test]
     fn find_falling_value() {
         let dumps = [
-            dump_with(0x0200_316C, Width::U16, 280),
-            dump_with(0x0200_316C, Width::U16, 273),
+            vec![dump_with(0x0200_316C, Width::U16, 280)],
+            vec![dump_with(0x0200_316C, Width::U16, 273)],
         ];
         assert_eq!(
             query(Width::U16, Rule::Dec).find(&dumps),
@@ -314,8 +365,28 @@ mod tests {
     }
 
     #[test]
+    fn find_values_same_within_groups() {
+        let player = dump_with(0x0201_6BA9, Width::U8, 0);
+        let mut moved = player.clone();
+        moved[0] = 7;
+        let groups = [
+            vec![player.clone(), moved],
+            vec![dump_with(0x0201_6BA9, Width::U8, 1)],
+            vec![dump_with(0x0201_6BA9, Width::U8, 2)],
+        ];
+        assert_eq!(
+            query(Width::U8, Rule::Distinct).find(&groups),
+            vec![Match {
+                address: 0x0201_6BA9,
+                values: vec![0, 1, 2],
+            }]
+        );
+        assert_eq!(query(Width::U8, Rule::Same).find(&[vec![]]), vec![]);
+    }
+
+    #[test]
     fn find_values_in_internal_ram() {
-        let dumps = [dump_with(0x0300_0010, Width::U32, 0x0200_315C)];
+        let dumps = [vec![dump_with(0x0300_0010, Width::U32, 0x0200_315C)]];
         let found = query(Width::U32, Rule::Eq(0x0200_315C)).find(&dumps);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].address, 0x0300_0010);
@@ -323,7 +394,7 @@ mod tests {
 
     #[test]
     fn find_only_aligned_values() {
-        let dumps = [dump_with(0x0200_0001, Width::U8, 9)];
+        let dumps = [vec![dump_with(0x0200_0001, Width::U8, 9)]];
         assert_eq!(query(Width::U16, Rule::Eq(9)).find(&dumps).len(), 0);
         assert_eq!(query(Width::U8, Rule::Eq(9)).find(&dumps).len(), 1);
     }
@@ -331,8 +402,8 @@ mod tests {
     #[test]
     fn find_values_in_range() {
         let dumps = [
-            dump_with(0x0200_0000, Width::U32, 0x0200_0000),
-            dump_with(0x0200_0000, Width::U32, 0x0100_0000),
+            vec![dump_with(0x0200_0000, Width::U32, 0x0200_0000)],
+            vec![dump_with(0x0200_0000, Width::U32, 0x0100_0000)],
         ];
         let mut search = query(Width::U32, Rule::Dec);
         assert_eq!(search.find(&dumps).len(), 1);
@@ -369,13 +440,17 @@ mod tests {
     fn run_on_dump_files() {
         let dir = tempfile::tempdir().unwrap();
         let before = dir.path().join("before.bin");
+        let again = dir.path().join("again.bin");
         let after = dir.path().join("after.bin");
         fs::write(&before, dump_with(0x0200_316C, Width::U16, 280)).unwrap();
+        fs::write(&again, dump_with(0x0200_316C, Width::U16, 280)).unwrap();
         fs::write(&after, dump_with(0x0200_316C, Width::U16, 273)).unwrap();
 
         let search = query(Width::U16, "seq=280,273".parse().unwrap());
         assert_eq!(
-            search.run(&[before, after]).unwrap(),
+            search
+                .run(&[Group(vec![before, again]), Group(vec![after])])
+                .unwrap(),
             "0200316C: 280 273\n1 match"
         );
     }
@@ -383,17 +458,19 @@ mod tests {
     #[test]
     fn reject_seq_of_wrong_length() {
         let search = query(Width::U16, "seq=280,273".parse().unwrap());
-        let err = search.run(&[PathBuf::from("ram.bin")]).unwrap_err();
+        let err = search
+            .run(&[Group(vec![PathBuf::from("a.bin"), PathBuf::from("b.bin")])])
+            .unwrap_err();
         assert!(matches!(
             err,
             SearchError::SeqLength {
                 values: 2,
-                dumps: 1
+                groups: 1
             }
         ));
         assert_eq!(
             err.to_string(),
-            "a seq rule needs one value per dump, but lists 2 for 1"
+            "a seq rule needs one value per group of dumps, but lists 2 for 1"
         );
     }
 
@@ -402,7 +479,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("missing.bin");
         let err = query(Width::U8, Rule::Same)
-            .run(std::slice::from_ref(&path))
+            .run(&[Group(vec![path.clone()])])
             .unwrap_err();
         assert!(matches!(err, SearchError::Read { .. }));
         assert!(
@@ -417,7 +494,7 @@ mod tests {
         let path = dir.path().join("short.bin");
         fs::write(&path, [0; 16]).unwrap();
         let err = query(Width::U8, Rule::Same)
-            .run(std::slice::from_ref(&path))
+            .run(&[Group(vec![path.clone()])])
             .unwrap_err();
         assert_eq!(
             err.to_string(),
