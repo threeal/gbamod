@@ -38,6 +38,7 @@ Thumb `bl` reaches only ±4 MB, so code in free space at the end of the ROM is r
    - To change the arguments, adjust the registers and tail-call with `ldr r3, =ORIGINAL` then `bx r3`, clobbering only registers the original is free to clobber.
    - To change the result, `push {r4, lr}`, call the original through a `bx` veneer label, adjust `r0`, then `pop {r4}`, `pop {r1}`, `bx r1`.
    - Every `push` moves the caller's stack words further from `sp`: a caller's `[sp+N]` is `[sp+N+8]` after `push {r4, lr}`.
+   - To keep a value between calls, find RAM the game never writes: run `track`, play through as much of the game as the value must survive, including battles, menus, and scene changes, then pick from `unwritten`'s longest runs, away from their edges. Record the frames it covered in the notes.
 4. Add a `[[hook]]` entry with `source`, `at`, `replaces`, and `slots`, then check the code with `asm hooks/hook.s`, which lists it at the hook's address with `ORIGINAL` defined, the way `build` places it. Use `[[patch]]` with `expect` for any other bytes, so a patch fails loudly if it's applied to the wrong ROM.
 
 ## Verifying

@@ -13,10 +13,13 @@
 #include <mgba/gba/core.h>
 #include <mgba/internal/arm/arm.h>
 #include <mgba/internal/arm/decoder.h>
+#include <mgba/internal/gba/memory.h>
+#include <mgba-util/math.h>
 #include <mgba-util/vfs.h>
 
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
 // mGBA writes each frame into a buffer that is 256 pixels wide, of which the
 // GBA screen uses the first 240.
@@ -29,6 +32,10 @@
 // How many words of the stack each hit records. Must match
 // `debug::MAX_STACK_WORDS` on the Rust side.
 #define STACK_WORDS 64
+
+// The working RAM whose writes are tracked, in the order of a RAM dump:
+// EWRAM, then IWRAM. Must match `memory::RAM_REGIONS` on the Rust side.
+#define TRACKED_BYTES (SIZE_WORKING_RAM + SIZE_WORKING_IRAM)
 
 // What a watchpoint or breakpoint saw when it fired. Must match `RawHit` in
 // `src/emulator.rs`.
@@ -55,6 +62,13 @@ struct gbamod_emulator {
 	struct gbamod_hit hits[MAX_HITS];
 	size_t kept_hits;
 	uint32_t total_hits;
+	// The CPU's stores before the write tracker took them over.
+	struct ARMMemory stores;
+	bool tracking;
+	// The frames run since tracking started.
+	uint32_t tracked_frames;
+	// One bit per byte of working RAM, set once the game writes the byte.
+	uint8_t written[TRACKED_BYTES / 8];
 	color_t video[VIDEO_STRIDE * VIDEO_HEIGHT];
 };
 
@@ -100,6 +114,69 @@ static void record_hit(struct mDebugger* debugger, enum mDebuggerEntryReason rea
 	for (uint32_t i = 0; i < STACK_WORDS; ++i) {
 		hit->stack[i] = core->rawRead32(core, sp + i * 4, -1);
 	}
+}
+
+static struct gbamod_emulator* emulator_of(struct ARMCore* cpu) {
+	// The debugger is the emulator's first field.
+	return (struct gbamod_emulator*) cpu->components[CPU_COMPONENT_DEBUGGER];
+}
+
+// Marks the `width` bytes of the aligned store at `address` as written, if
+// they're in working RAM, which repeats through its whole 16 MiB area.
+static void mark_written(struct ARMCore* cpu, uint32_t address, uint32_t width) {
+	struct gbamod_emulator* emulator = emulator_of(cpu);
+	if (!emulator->tracking) {
+		return;
+	}
+	address &= ~(width - 1);
+	uint32_t offset;
+	switch (address >> 24) {
+	case REGION_WORKING_RAM:
+		offset = address & (SIZE_WORKING_RAM - 1);
+		break;
+	case REGION_WORKING_IRAM:
+		offset = SIZE_WORKING_RAM + (address & (SIZE_WORKING_IRAM - 1));
+		break;
+	default:
+		return;
+	}
+	for (uint32_t i = offset; i < offset + width; ++i) {
+		emulator->written[i / 8] |= 1 << (i % 8);
+	}
+}
+
+static void track_store32(struct ARMCore* cpu, uint32_t address, int32_t value, int* cycles) {
+	mark_written(cpu, address, 4);
+	emulator_of(cpu)->stores.store32(cpu, address, value, cycles);
+}
+
+static void track_store16(struct ARMCore* cpu, uint32_t address, int16_t value, int* cycles) {
+	mark_written(cpu, address, 2);
+	emulator_of(cpu)->stores.store16(cpu, address, value, cycles);
+}
+
+static void track_store8(struct ARMCore* cpu, uint32_t address, int8_t value, int* cycles) {
+	mark_written(cpu, address, 1);
+	emulator_of(cpu)->stores.store8(cpu, address, value, cycles);
+}
+
+// Marks the words a store-multiple writes, found the way mGBA's debugger
+// finds them for its watchpoints.
+static uint32_t track_store_multiple(struct ARMCore* cpu, uint32_t address, int mask, enum LSMDirection direction, int* cycles) {
+	uint32_t count = popcount32(mask);
+	uint32_t base = address;
+	if (direction & LSM_D) {
+		base -= (count << 2) - 4;
+		if (direction & LSM_B) {
+			base -= 4;
+		}
+	} else if (direction & LSM_B) {
+		base += 4;
+	}
+	for (uint32_t i = 0; i < count; ++i) {
+		mark_written(cpu, base + 4 * i, 4);
+	}
+	return emulator_of(cpu)->stores.storeMultiple(cpu, address, mask, direction, cycles);
 }
 
 static void quiet_log(struct mLogger* logger, int category, enum mLogLevel level, const char* format, va_list args) {
@@ -155,6 +232,16 @@ struct gbamod_emulator* gbamod_emulator_new(const void* rom, size_t size) {
 	emulator->debugger.type = DEBUGGER_CUSTOM;
 	emulator->debugger.entered = record_hit;
 	mDebuggerAttach(&emulator->debugger, core);
+
+	// Every store the game makes, from the CPU, DMA, or the BIOS, goes
+	// through these. The tracker takes them over before any watchpoint, so
+	// mGBA's own memory shim wraps it and restores it when removed.
+	struct ARMCore* cpu = core->cpu;
+	emulator->stores = cpu->memory;
+	cpu->memory.store32 = track_store32;
+	cpu->memory.store16 = track_store16;
+	cpu->memory.store8 = track_store8;
+	cpu->memory.storeMultiple = track_store_multiple;
 	return emulator;
 }
 
@@ -166,6 +253,9 @@ void gbamod_emulator_free(struct gbamod_emulator* emulator) {
 }
 
 void gbamod_emulator_run_frames(struct gbamod_emulator* emulator, uint32_t frames) {
+	if (emulator->tracking) {
+		emulator->tracked_frames += frames;
+	}
 	for (uint32_t i = 0; i < frames; ++i) {
 		// The debugger steps one instruction at a time to check its points,
 		// so it only runs the frame when there are points to check.
@@ -276,6 +366,25 @@ const struct gbamod_hit* gbamod_emulator_hits(const struct gbamod_emulator* emul
 void gbamod_emulator_clear_hits(struct gbamod_emulator* emulator) {
 	emulator->kept_hits = 0;
 	emulator->total_hits = 0;
+}
+
+// Starts tracking which bytes of working RAM the game writes, forgetting any
+// earlier writes.
+void gbamod_emulator_track_writes(struct gbamod_emulator* emulator) {
+	memset(emulator->written, 0, sizeof(emulator->written));
+	emulator->tracked_frames = 0;
+	emulator->tracking = true;
+}
+
+// Returns the bitmap of written bytes, TRACKED_BYTES / 8 bytes long with
+// the low bit first, storing the frames run since tracking started in
+// `frames`, or NULL if writes aren't tracked.
+const uint8_t* gbamod_emulator_written(const struct gbamod_emulator* emulator, uint32_t* frames) {
+	if (!emulator->tracking) {
+		return NULL;
+	}
+	*frames = emulator->tracked_frames;
+	return emulator->written;
 }
 
 // Writes r0 to r15 and then cpsr into `registers`, where r15 is the address
