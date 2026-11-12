@@ -58,6 +58,14 @@ gbamod dump ram.bin               # write all working RAM to a file
 
 A dump holds the 256 KiB EWRAM from `0x02000000`, followed by the 32 KiB IWRAM from `0x03000000`, so a file offset below `0x40000` is that offset into EWRAM and anything from there on is IWRAM.
 
+Find working RAM the game never writes, where a hook can keep its own values. Tracking sees every write, whether from the CPU, DMA, or the BIOS, and lasts across later commands and loaded savestates, so play through as much of the game as the hook's values must survive before trusting a run:
+
+```sh
+gbamod track            # start tracking writes, forgetting earlier ones
+gbamod unwritten        # the 10 longest runs never written since, with the frames covered
+gbamod unwritten --count 3
+```
+
 Disassemble code from the session's memory, in the ROM or in RAM:
 
 ```sh

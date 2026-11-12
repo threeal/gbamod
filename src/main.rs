@@ -86,24 +86,7 @@ mod cli {
                     .about("Save the session's screen as a PNG")
                     .arg(file_arg("The PNG file to write")),
             )
-            .subcommand(
-                Command::new("peek")
-                    .about("Print bytes from the session's memory as hex")
-                    .arg(number_arg("address", "The address of the first byte"))
-                    .arg(
-                        Arg::new("count")
-                            .help("The number of bytes to print [default: 16]")
-                            .value_parser(memory::parse_number),
-                    ),
-            )
-            .subcommand(poke_command("poke8", "byte"))
-            .subcommand(poke_command("poke16", "16-bit halfword"))
-            .subcommand(poke_command("poke32", "32-bit word"))
-            .subcommand(
-                Command::new("dump")
-                    .about("Write the session's working RAM to a file, EWRAM then IWRAM")
-                    .arg(file_arg("The dump file to write")),
-            )
+            .subcommands(memory_commands())
             .subcommand(search_command())
             .subcommand(pixels_command())
             .subcommands(debugger_commands())
@@ -165,6 +148,10 @@ mod cli {
             Some(("poke16", args)) => poke(args, Width::U16).and_then(request),
             Some(("poke32", args)) => poke(args, Width::U32).and_then(request),
             Some(("dump", args)) => request(Request::Dump { path: file(args) }),
+            Some(("track", _)) => request(Request::Track),
+            Some(("unwritten", args)) => request(Request::Unwritten {
+                count: args.get_one::<u32>("count").copied().unwrap_or(10),
+            }),
             Some(("dis", args)) => request(Request::Dis(Dis {
                 address: number(args, "address"),
                 count: args
@@ -211,6 +198,35 @@ mod cli {
             }
             _ => unreachable!("clap requires a known subcommand"),
         }
+    }
+
+    fn memory_commands() -> [Command; 7] {
+        [
+            Command::new("peek")
+                .about("Print bytes from the session's memory as hex")
+                .arg(number_arg("address", "The address of the first byte"))
+                .arg(
+                    Arg::new("count")
+                        .help("The number of bytes to print [default: 16]")
+                        .value_parser(memory::parse_number),
+                ),
+            poke_command("poke8", "byte"),
+            poke_command("poke16", "16-bit halfword"),
+            poke_command("poke32", "32-bit word"),
+            Command::new("dump")
+                .about("Write the session's working RAM to a file, EWRAM then IWRAM")
+                .arg(file_arg("The dump file to write")),
+            Command::new("track").about(
+                "Start tracking which bytes of working RAM the game writes, forgetting earlier writes",
+            ),
+            Command::new("unwritten")
+                .about("List the longest runs of working RAM the game hasn't written since `track`")
+                .arg(
+                    arg!(--count <runs> "The most runs to list")
+                        .value_parser(value_parser!(u32))
+                        .default_value("10"),
+                ),
+        ]
     }
 
     fn search_command() -> Command {

@@ -11,6 +11,7 @@ use crate::memory::Width;
 use crate::rom::Rom;
 use crate::screen::{HEIGHT, Screen};
 use crate::session::Machine;
+use crate::writes::{self, Written};
 use std::ffi::{CStr, c_char, c_void};
 use std::ptr::NonNull;
 
@@ -64,6 +65,8 @@ unsafe extern "C" {
     ) -> *const RawHit;
     fn gbamod_emulator_clear_hits(emulator: *mut RawEmulator);
     fn gbamod_emulator_registers(emulator: *const RawEmulator, registers: *mut u32);
+    fn gbamod_emulator_track_writes(emulator: *mut RawEmulator);
+    fn gbamod_emulator_written(emulator: *const RawEmulator, frames: *mut u32) -> *const u8;
     fn gbamod_emulator_disassemble(
         emulator: *mut RawEmulator,
         address: u32,
@@ -239,6 +242,24 @@ impl Machine for Emulator {
         Registers {
             general,
             cpsr: values[16],
+        }
+    }
+
+    fn track_writes(&mut self) {
+        // SAFETY: `raw` is a live emulator owned by `self`.
+        unsafe { gbamod_emulator_track_writes(self.raw.as_ptr()) };
+    }
+
+    fn written(&self) -> Option<Written> {
+        let mut frames = 0;
+        // SAFETY: `raw` is a live emulator owned by `self`, and a bitmap the
+        // shim returns holds one bit for each byte of a RAM dump.
+        unsafe {
+            let bits = gbamod_emulator_written(self.raw.as_ptr(), &raw mut frames);
+            (!bits.is_null()).then(|| {
+                let bits = std::slice::from_raw_parts(bits, writes::BITMAP_SIZE).to_vec();
+                Written::new(frames, bits)
+            })
         }
     }
 }

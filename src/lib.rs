@@ -18,6 +18,7 @@ pub mod rom;
 pub mod screen;
 pub mod search;
 pub mod session;
+pub mod writes;
 
 use game::{Game, GameError};
 use std::path::Path;

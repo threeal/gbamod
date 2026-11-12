@@ -10,6 +10,7 @@ use crate::disasm::{self, Instruction, Mode};
 use crate::keys::{Keys, Pattern};
 use crate::memory::{self, Width};
 use crate::screen::Screen;
+use crate::writes::Written;
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -97,6 +98,15 @@ pub enum Request {
     Clear,
     /// Prints the CPU registers.
     Regs,
+    /// Starts tracking which bytes of working RAM the game writes,
+    /// forgetting any earlier writes.
+    Track,
+    /// Lists the longest runs of working RAM the game hasn't written since
+    /// tracking started.
+    Unwritten {
+        /// The most runs to list.
+        count: u32,
+    },
     /// Ends the session.
     Stop,
 }
@@ -171,6 +181,12 @@ pub trait Machine {
     fn take_hits(&mut self) -> Hits;
     /// Returns the CPU registers, where `pc` is the next instruction to run.
     fn registers(&self) -> Registers;
+    /// Starts tracking which bytes of working RAM the game writes,
+    /// forgetting any earlier writes.
+    fn track_writes(&mut self);
+    /// Returns the bytes written since tracking started, or `None` if writes
+    /// aren't tracked.
+    fn written(&self) -> Option<Written>;
 }
 
 /// The state of a session: its machine, and the keys held and points set
@@ -280,6 +296,14 @@ impl<M: Machine> Session<M> {
                 Ok(format!("Cleared {count} points"))
             }
             Request::Regs => Ok(self.machine.registers().to_string()),
+            Request::Track => {
+                self.machine.track_writes();
+                Ok(format!(
+                    "Tracking writes to RAM from frame {}",
+                    self.machine.frame()
+                ))
+            }
+            Request::Unwritten { count } => self.unwritten(*count),
             Request::Stop => Ok("Stopped the session".to_string()),
         }
     }
@@ -383,6 +407,27 @@ impl<M: Machine> Session<M> {
             .map(|point| format!("Point {}: {point}", point.id))
             .collect();
         lines.join("\n")
+    }
+
+    /// Lists up to `count` of the longest runs of RAM never written since
+    /// tracking started.
+    fn unwritten(&self, count: u32) -> Result<String, String> {
+        let written = self
+            .machine
+            .written()
+            .ok_or("writes to RAM aren't tracked; start with `gbamod track`")?;
+        let spans = written.unwritten();
+        let frames = written.frames;
+        if spans.is_empty() {
+            return Ok(format!(
+                "Every byte of RAM was written over {frames} frames"
+            ));
+        }
+        let runs = spans.len();
+        let heading = format!("Never written over {frames} frames ({runs} runs, longest first):");
+        let mut lines = vec![heading];
+        lines.extend(spans.iter().take(count as usize).map(ToString::to_string));
+        Ok(lines.join("\n"))
     }
 
     /// Writes a poke's value to memory if it fits in its width.
@@ -497,6 +542,7 @@ pub fn send(socket: &Path, request: &Request) -> Result<String, SessionError> {
 mod tests {
     use super::*;
     use crate::screen::{HEIGHT, WIDTH};
+    use crate::writes;
     use std::fs;
     use std::thread;
 
@@ -514,6 +560,10 @@ mod tests {
         points: Vec<i64>,
         next_point: i64,
         hits: Hits,
+        written: Option<Written>,
+        /// Whether the game writes every byte of RAM while writes are
+        /// tracked.
+        everything: bool,
     }
 
     impl Machine for FakeMachine {
@@ -524,6 +574,9 @@ mod tests {
         fn run_frames(&mut self, frames: u32) {
             self.keys.push((self.current_keys, frames));
             self.frame += frames;
+            if let Some(written) = &mut self.written {
+                written.frames += frames;
+            }
             for &(frame, address, value) in &self.changes {
                 if frame <= self.frame {
                     self.memory.insert(address, value);
@@ -598,6 +651,22 @@ mod tests {
 
         fn registers(&self) -> Registers {
             debug::tests::registers()
+        }
+
+        /// Tracks a game that writes every byte but the four from
+        /// `0x02000010` and the last 256 of EWRAM, or with `everything`,
+        /// every byte.
+        fn track_writes(&mut self) {
+            let mut bits = vec![0xFF; writes::BITMAP_SIZE];
+            if !self.everything {
+                bits[2] = 0xF0;
+                bits[0x3_FF00 / 8..0x4_0000 / 8].fill(0);
+            }
+            self.written = Some(Written::new(0, bits));
+        }
+
+        fn written(&self) -> Option<Written> {
+            self.written.clone()
         }
     }
 
@@ -1121,6 +1190,52 @@ mod tests {
                 .starts_with("the session sent an invalid response: ")
         );
         server.join().unwrap();
+    }
+
+    #[test]
+    fn list_unwritten_runs() {
+        let mut session = Session::new(FakeMachine::default());
+        session.handle(&run(10)).unwrap();
+        assert_eq!(
+            session.handle(&Request::Track),
+            Ok("Tracking writes to RAM from frame 10".into())
+        );
+        session.handle(&run(50)).unwrap();
+        assert_eq!(
+            session.handle(&Request::Unwritten { count: 10 }),
+            Ok("Never written over 50 frames (2 runs, longest first):\n\
+                0x0203FF00-0x0203FFFF (256 bytes)\n\
+                0x02000010-0x02000013 (4 bytes)"
+                .into())
+        );
+        assert_eq!(
+            session.handle(&Request::Unwritten { count: 1 }),
+            Ok("Never written over 50 frames (2 runs, longest first):\n\
+                0x0203FF00-0x0203FFFF (256 bytes)"
+                .into())
+        );
+    }
+
+    #[test]
+    fn report_every_byte_written() {
+        let mut session = Session::new(FakeMachine {
+            everything: true,
+            ..FakeMachine::default()
+        });
+        session.handle(&Request::Track).unwrap();
+        assert_eq!(
+            session.handle(&Request::Unwritten { count: 10 }),
+            Ok("Every byte of RAM was written over 0 frames".into())
+        );
+    }
+
+    #[test]
+    fn reject_unwritten_without_tracking() {
+        let mut session = Session::new(FakeMachine::default());
+        assert_eq!(
+            session.handle(&Request::Unwritten { count: 10 }),
+            Err("writes to RAM aren't tracked; start with `gbamod track`".into())
+        );
     }
 
     #[test]
