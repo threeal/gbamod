@@ -12,7 +12,8 @@ mod cli {
     use gbamod::memory::{self, Width};
     use gbamod::pixels::{self, Area, Token};
     use gbamod::search::{Group, Query, Rule};
-    use gbamod::session::{self, Dis, Poke, Request, Run};
+    use gbamod::session::{self, Dis, Poke, Request, Run, Sheet};
+    use std::num::NonZeroU32;
     use std::path::{Path, PathBuf};
 
     /// Defines the command line.
@@ -54,6 +55,15 @@ mod cli {
                     .arg(
                         arg!(--keys <pattern> "Press keys in turn instead of the held ones, such as B:4,none:4 for B held 4 frames and released 4, repeating")
                             .value_parser(value_parser!(Pattern)),
+                    )
+                    .arg(
+                        arg!(--sheet <file> "Save a screenshot every --every frames, and one of the last frame, as one PNG sheet in rows of 4")
+                            .value_parser(value_parser!(PathBuf)),
+                    )
+                    .arg(
+                        arg!(--every <frames> "The frames between the screenshots of --sheet")
+                            .value_parser(value_parser!(NonZeroU32))
+                            .default_value("60"),
                     ),
             )
             .subcommand(
@@ -121,14 +131,7 @@ mod cli {
                     .map_err(|err| err.to_string())
             }
             Some(("stop", _)) => request(Request::Stop),
-            Some(("run", args)) => request(Request::Run(Run {
-                frames: frames(args),
-                until: args.get_one::<Condition>("until").map(|until| Condition {
-                    width: args.get_one::<Width>("width").copied().unwrap_or(Width::U8),
-                    ..*until
-                }),
-                keys: args.get_one::<Pattern>("keys").cloned(),
-            })),
+            Some(("run", args)) => request(Request::Run(run_request(args))),
             Some(("hold", args)) => request(Request::Hold { keys: keys(args) }),
             Some(("tap", args)) => request(Request::Tap {
                 keys: keys(args),
@@ -414,6 +417,25 @@ mod cli {
 
     fn keys(args: &ArgMatches) -> Keys {
         args.get_one::<Keys>("keys").copied().unwrap_or_default()
+    }
+
+    /// Returns the run the `run` subcommand's arguments ask for.
+    fn run_request(args: &ArgMatches) -> Run {
+        Run {
+            frames: frames(args),
+            until: args.get_one::<Condition>("until").map(|until| Condition {
+                width: args.get_one::<Width>("width").copied().unwrap_or(Width::U8),
+                ..*until
+            }),
+            keys: args.get_one::<Pattern>("keys").cloned(),
+            sheet: args.get_one::<PathBuf>("sheet").map(|file| Sheet {
+                every: args
+                    .get_one::<NonZeroU32>("every")
+                    .copied()
+                    .unwrap_or(NonZeroU32::MIN),
+                path: std::path::absolute(file).unwrap_or_else(|_| file.clone()),
+            }),
+        }
     }
 
     /// Returns the file argument as an absolute path, since the session runs
