@@ -48,6 +48,12 @@ gbamod run 3600 --keys B:4,none:4                    # press B for 4 frames, rel
 
 The condition is checked after every frame, and the run reports where it stopped and the value it saw, or that the frames ran out first. `--width` sets the width of the value, a u8 by default, and both options can be given together.
 
+To see what happened along the way, a run can also save a sheet of screenshots: one every `--every` frames, 60 by default, and one of the last frame, laid out left to right in rows of 4. The run lists the frame each one shows:
+
+```sh
+gbamod run 1200 --sheet phase.png --every 120
+```
+
 While a session runs, read and write its memory. Addresses and values are decimal, or hex with a `0x` prefix:
 
 ```sh

@@ -9,9 +9,10 @@ use crate::debug::{self, Hits, Point, PointKind, Registers, WatchKind};
 use crate::disasm::{self, Instruction, Mode};
 use crate::keys::{Keys, Pattern};
 use crate::memory::{self, Width};
-use crate::screen::Screen;
+use crate::screen::{self, SHEET_COLUMNS, Screen};
 use crate::writes::Written;
 use std::io::{self, BufRead, BufReader, Write};
+use std::num::NonZeroU32;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 
@@ -123,6 +124,19 @@ pub struct Run {
     /// Keys pressed in turn instead of the held keys.
     #[serde(default)]
     pub keys: Option<Pattern>,
+    /// Frames to save as one sheet of screenshots.
+    #[serde(default)]
+    pub sheet: Option<Sheet>,
+}
+
+/// Frames of a run to save as one sheet of screenshots: one every so many
+/// frames, and the last frame.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Sheet {
+    /// The frames between screenshots.
+    pub every: NonZeroU32,
+    /// The PNG file to save the sheet to.
+    pub path: PathBuf,
 }
 
 /// A value to write to memory.
@@ -309,12 +323,14 @@ impl<M: Machine> Session<M> {
     }
 
     /// Runs up to the run's frames, pressing its keys or else the held keys,
-    /// and stops after the first frame where its condition holds.
+    /// stops after the first frame where its condition holds, and saves the
+    /// frames its sheet asks for.
     fn run(&mut self, run: &Run) -> Result<String, String> {
         let frames = run.frames;
         let until = run.until.as_ref();
         let pattern = run.keys.as_ref();
-        if until.is_none() && pattern.is_none() {
+        let sheet = run.sheet.as_ref();
+        if until.is_none() && pattern.is_none() && sheet.is_none() {
             self.machine.set_keys(self.held);
             self.machine.run_frames(frames);
             return Ok(self.with_hits(format!(
@@ -333,11 +349,17 @@ impl<M: Machine> Session<M> {
         let start = until.map(|condition| self.read_value(condition));
         let mut ran = 0;
         let mut stopped = None;
+        let mut shots = Vec::new();
         while ran < frames {
             self.machine
                 .set_keys(pattern.map_or(self.held, |pattern| pattern.keys_at(ran)));
             self.machine.run_frames(1);
             ran += 1;
+            if let Some(sheet) = sheet
+                && ran % sheet.every == 0
+            {
+                shots.push((self.machine.frame(), self.machine.screen()));
+            }
             if let (Some(condition), Some(start)) = (until, start) {
                 let value = self.read_value(condition);
                 if condition.test.holds(start, value) {
@@ -352,7 +374,30 @@ impl<M: Machine> Session<M> {
             message.push_str("; ");
             message.push_str(&describe_stop(condition, start, stopped));
         }
+        if let Some(sheet) = sheet {
+            message.push_str("; ");
+            message.push_str(&self.save_sheet(sheet, shots)?);
+        }
         Ok(self.with_hits(message))
+    }
+
+    /// Saves the frames shot during a run, then the last frame unless it was
+    /// just shot, as one sheet, describing which frame each tile shows.
+    fn save_sheet(&self, sheet: &Sheet, mut shots: Vec<(u32, Screen)>) -> Result<String, String> {
+        let frame = self.machine.frame();
+        if shots.last().is_none_or(|(shot, _)| *shot != frame) {
+            shots.push((frame, self.machine.screen()));
+        }
+        let (frames, screens): (Vec<u32>, Vec<Screen>) = shots.into_iter().unzip();
+        write(&sheet.path, &screen::encode_sheet_png(&screens))?;
+        let unit = if frames.len() == 1 { "frame" } else { "frames" };
+        let frames: Vec<String> = frames.iter().map(u32::to_string).collect();
+        Ok(format!(
+            "saved {} {unit} to {} in rows of {SHEET_COLUMNS}: {}",
+            frames.len(),
+            sheet.path.display(),
+            frames.join(", ")
+        ))
     }
 
     /// Reads the value a condition is on.
@@ -687,6 +732,7 @@ mod tests {
             frames,
             until: None,
             keys: None,
+            sheet: None,
         })
     }
 
@@ -697,6 +743,7 @@ mod tests {
             frames,
             until: Some(until),
             keys: None,
+            sheet: None,
         })
     }
 
@@ -760,6 +807,7 @@ mod tests {
                 frames: 5,
                 until: None,
                 keys: Some("B:2,none:1".parse().unwrap()),
+                sheet: None,
             })),
             Ok("Ran 5 frames, now at frame 5".into())
         );
@@ -769,6 +817,81 @@ mod tests {
             [keys("B"), keys("B"), Keys::NONE, keys("B"), keys("B")]
         );
         assert_eq!(session.machine.current_keys, keys("UP"));
+    }
+
+    /// Returns a run of `frames` frames that saves a sheet of one frame in
+    /// `every` to `path`.
+    fn run_sheet(frames: u32, every: u32, path: &Path) -> Run {
+        Run {
+            frames,
+            until: None,
+            keys: None,
+            sheet: Some(Sheet {
+                every: NonZeroU32::new(every).unwrap(),
+                path: path.to_path_buf(),
+            }),
+        }
+    }
+
+    #[test]
+    fn run_with_sheet() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sheet.png");
+        let mut session = Session::new(FakeMachine::default());
+        assert_eq!(
+            session.handle(&Request::Run(run_sheet(5, 2, &path))),
+            Ok(format!(
+                "Ran 5 frames, now at frame 5; saved 3 frames to {} in rows of 4: 2, 4, 5",
+                path.display()
+            ))
+        );
+        let screen = session.machine.screen();
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            screen::encode_sheet_png(&[screen.clone(), screen.clone(), screen])
+        );
+        assert_eq!(session.machine.keys, vec![(Keys::NONE, 1); 5]);
+    }
+
+    #[test]
+    fn run_with_sheet_until_shot_frame() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sheet.png");
+        let mut session = session_changing(4, 0x0201_6BA9, 0);
+        let mut run = run_sheet(100, 2, &path);
+        run.until = Some("0x02016BA9=0".parse().unwrap());
+        assert_eq!(
+            session.handle(&Request::Run(run)),
+            Ok(format!(
+                "Ran 4 frames, now at frame 4; 0x02016BA9 is 0x00; saved 2 frames to {} in rows of 4: 2, 4",
+                path.display()
+            ))
+        );
+    }
+
+    #[test]
+    fn run_no_frames_with_sheet() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sheet.png");
+        let mut session = Session::new(FakeMachine::default());
+        assert_eq!(
+            session.handle(&Request::Run(run_sheet(0, 60, &path))),
+            Ok(format!(
+                "Ran 0 frames, now at frame 0; saved 1 frame to {} in rows of 4: 0",
+                path.display()
+            ))
+        );
+    }
+
+    #[test]
+    fn reject_sheet_in_missing_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing").join("sheet.png");
+        let mut session = Session::new(FakeMachine::default());
+        let err = session
+            .handle(&Request::Run(run_sheet(1, 1, &path)))
+            .unwrap_err();
+        assert!(err.starts_with(&format!("failed to write `{}`: ", path.display())));
     }
 
     #[test]

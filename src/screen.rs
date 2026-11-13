@@ -6,6 +6,12 @@ pub const WIDTH: usize = 240;
 /// The height of the GBA screen in pixels.
 pub const HEIGHT: usize = 160;
 
+/// The most frames in one row of a sheet.
+pub const SHEET_COLUMNS: usize = 4;
+
+/// The pixels of black between the frames of a sheet.
+const SHEET_GAP: usize = 2;
+
 /// The reason a PNG image can't be read as a frame of the screen.
 #[derive(Debug, thiserror::Error)]
 pub enum ScreenError {
@@ -104,25 +110,56 @@ impl Screen {
     }
 
     /// Encodes the frame as an 8-bit RGB PNG image.
-    ///
-    /// # Panics
-    ///
-    /// Never panics in practice: the encoder only fails on I/O errors or
-    /// mismatched dimensions, and it writes to memory with the screen's own
-    /// dimensions.
     #[must_use]
     pub fn encode_png(&self) -> Vec<u8> {
-        let mut png = Vec::new();
-        #[allow(clippy::cast_possible_truncation)]
-        let mut encoder = png::Encoder::new(&mut png, WIDTH as u32, HEIGHT as u32);
-        encoder.set_color(png::ColorType::Rgb);
-        encoder.set_depth(png::BitDepth::Eight);
-        encoder
-            .write_header()
-            .and_then(|mut writer| writer.write_image_data(&self.rgb))
-            .expect("encoding to memory with matching dimensions can't fail");
-        png
+        encode_rgb(WIDTH, HEIGHT, &self.rgb)
     }
+}
+
+/// Encodes frames as one 8-bit RGB PNG image, laid out left to right and top
+/// to bottom in rows of up to [`SHEET_COLUMNS`], with black between them.
+///
+/// # Panics
+///
+/// Panics if there are no frames.
+#[must_use]
+pub fn encode_sheet_png(screens: &[Screen]) -> Vec<u8> {
+    assert!(!screens.is_empty(), "a sheet needs at least one frame");
+    let columns = screens.len().min(SHEET_COLUMNS);
+    let rows = screens.len().div_ceil(SHEET_COLUMNS);
+    let width = columns * (WIDTH + SHEET_GAP) - SHEET_GAP;
+    let height = rows * (HEIGHT + SHEET_GAP) - SHEET_GAP;
+    let mut rgb = vec![0; width * height * 3];
+    for (index, screen) in screens.iter().enumerate() {
+        let left = index % SHEET_COLUMNS * (WIDTH + SHEET_GAP);
+        let top = index / SHEET_COLUMNS * (HEIGHT + SHEET_GAP);
+        for (y, row) in screen.rgb.as_chunks::<{ WIDTH * 3 }>().0.iter().enumerate() {
+            let offset = ((top + y) * width + left) * 3;
+            rgb[offset..offset + WIDTH * 3].copy_from_slice(row);
+        }
+    }
+    encode_rgb(width, height, &rgb)
+}
+
+/// Encodes `rgb`, 8-bit RGB pixels in row-major order, as a PNG image of the
+/// given size.
+///
+/// # Panics
+///
+/// Never panics in practice: the encoder only fails on I/O errors or
+/// mismatched dimensions, and it writes to memory with dimensions that match
+/// the pixels.
+fn encode_rgb(width: usize, height: usize, rgb: &[u8]) -> Vec<u8> {
+    let mut png = Vec::new();
+    #[allow(clippy::cast_possible_truncation)]
+    let mut encoder = png::Encoder::new(&mut png, width as u32, height as u32);
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder
+        .write_header()
+        .and_then(|mut writer| writer.write_image_data(rgb))
+        .expect("encoding to memory with matching dimensions can't fail");
+    png
 }
 
 #[cfg(test)]
@@ -250,6 +287,51 @@ mod tests {
             Screen::decode_png(&png).unwrap_err().to_string(),
             "the image is grayscale, but a screenshot is in color"
         );
+    }
+
+    /// Returns a frame filled with one color.
+    fn filled(color: [u8; 3]) -> Screen {
+        Screen {
+            rgb: color.repeat(WIDTH * HEIGHT),
+        }
+    }
+
+    /// Decodes a PNG image into its size and RGB pixels.
+    fn decode(png: &[u8]) -> (usize, usize, Vec<u8>) {
+        let mut reader = png::Decoder::new(std::io::Cursor::new(png))
+            .read_info()
+            .unwrap();
+        let mut rgb = vec![0; reader.output_buffer_size().unwrap()];
+        let info = reader.next_frame(&mut rgb).unwrap();
+        (info.width as usize, info.height as usize, rgb)
+    }
+
+    #[test]
+    fn encode_sheet_in_rows() {
+        let screens: Vec<Screen> = (1..=5).map(|shade| filled([shade, 0, 0])).collect();
+        let (width, height, rgb) = decode(&encode_sheet_png(&screens));
+        assert_eq!((width, height), (4 * 242 - 2, 2 * 162 - 2));
+        let pixel = |x: usize, y: usize| rgb[(y * width + x) * 3];
+        assert_eq!(pixel(0, 0), 1);
+        assert_eq!(pixel(239, 159), 1);
+        assert_eq!(pixel(240, 0), 0);
+        assert_eq!(pixel(242, 0), 2);
+        assert_eq!(pixel(3 * 242 + 239, 159), 4);
+        assert_eq!(pixel(0, 160), 0);
+        assert_eq!(pixel(0, 162), 5);
+        assert_eq!(pixel(242, 162), 0);
+    }
+
+    #[test]
+    fn encode_sheet_of_one_frame() {
+        let screen = filled([1, 2, 3]);
+        assert_eq!(encode_sheet_png(&[screen.clone()]), screen.encode_png());
+    }
+
+    #[test]
+    #[should_panic(expected = "a sheet needs at least one frame")]
+    fn reject_empty_sheet() {
+        let _ = encode_sheet_png(&[]);
     }
 
     #[test]
