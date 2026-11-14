@@ -240,7 +240,7 @@ mod cli {
                     .value_parser(value_parser!(Width)),
             )
             .arg(
-                arg!(<rule> "How the values change across the groups: dec, inc, same, changed, distinct, eq=N, or seq=A,B,... with * for any")
+                arg!(<rule> "How the values change across the groups: dec, inc, same, changed, distinct, eq=N, or seq=A,B,... with * for any; dec and inc take <=N or <=N% to bound each step")
                     .value_parser(value_parser!(Rule)),
             )
             .arg(
