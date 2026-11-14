@@ -17,10 +17,12 @@ pub const MAX_LISTED: usize = 200;
 /// How a value must change across the groups of dumps, in order, to match.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Rule {
-    /// Never rises, and falls at least once.
-    Dec,
-    /// Never falls, and rises at least once.
-    Inc,
+    /// Never rises, and falls at least once, by no more than the bound from
+    /// one group to the next.
+    Dec(Option<Bound>),
+    /// Never falls, and rises at least once, by no more than the bound from
+    /// one group to the next.
+    Inc(Option<Bound>),
     /// Equal in every group.
     Same,
     /// Differs between the first and last group.
@@ -34,11 +36,47 @@ pub enum Rule {
     Seq(Vec<Option<u32>>),
 }
 
+/// The most a value may move from one group to the next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bound {
+    /// By the number.
+    Amount(u32),
+    /// By the percentage of the earlier value.
+    Percent(u32),
+}
+
+impl Bound {
+    /// Returns whether a value moving from `from` to `to` stays within this
+    /// bound.
+    #[must_use]
+    pub fn allows(self, from: u32, to: u32) -> bool {
+        let moved = u64::from(from.abs_diff(to));
+        match self {
+            Self::Amount(number) => moved <= u64::from(number),
+            Self::Percent(percent) => moved * 100 <= u64::from(from) * u64::from(percent),
+        }
+    }
+}
+
+impl FromStr for Bound {
+    type Err = MemoryError;
+
+    /// Parses a number, such as `50`, or a percentage, such as `25%`.
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        text.strip_suffix('%').map_or_else(
+            || memory::parse_number(text).map(Self::Amount),
+            |percent| memory::parse_number(percent).map(Self::Percent),
+        )
+    }
+}
+
 /// The reason a search couldn't run.
 #[derive(Debug, thiserror::Error)]
 pub enum SearchError {
     /// The text isn't a known rule.
-    #[error("unknown rule `{0}`; expected dec, inc, same, changed, distinct, eq=N, or seq=A,B,...")]
+    #[error(
+        "unknown rule `{0}`; expected dec, inc, same, changed, distinct, eq=N, or seq=A,B,..., where dec and inc take an optional <=N or <=N%"
+    )]
     UnknownRule(String),
     /// A number in the rule isn't valid.
     #[error(transparent)]
@@ -77,8 +115,18 @@ impl Rule {
             return false;
         };
         match self {
-            Self::Dec => values.windows(2).all(|pair| pair[1] <= pair[0]) && last < first,
-            Self::Inc => values.windows(2).all(|pair| pair[1] >= pair[0]) && last > first,
+            Self::Dec(bound) => {
+                values
+                    .windows(2)
+                    .all(|pair| pair[1] <= pair[0] && within(*bound, pair))
+                    && last < first
+            }
+            Self::Inc(bound) => {
+                values
+                    .windows(2)
+                    .all(|pair| pair[1] >= pair[0] && within(*bound, pair))
+                    && last > first
+            }
             Self::Same => values.iter().all(|&value| value == first),
             Self::Changed => last != first,
             Self::Distinct => values
@@ -94,11 +142,24 @@ impl Rule {
     }
 }
 
+/// Returns whether a pair of values, from one group to the next, stays
+/// within the bound, if there is one.
+fn within(bound: Option<Bound>, pair: &[u32]) -> bool {
+    bound.is_none_or(|bound| bound.allows(pair[0], pair[1]))
+}
+
 impl FromStr for Rule {
     type Err = SearchError;
 
-    /// Parses a rule such as `dec`, `eq=288`, or `seq=288,*,0x111`.
+    /// Parses a rule such as `dec`, `dec<=25%`, `eq=288`, or
+    /// `seq=288,*,0x111`.
     fn from_str(text: &str) -> Result<Self, Self::Err> {
+        if let Some(bound) = text.strip_prefix("dec<=") {
+            return Ok(Self::Dec(Some(bound.parse()?)));
+        }
+        if let Some(bound) = text.strip_prefix("inc<=") {
+            return Ok(Self::Inc(Some(bound.parse()?)));
+        }
         if let Some(number) = text.strip_prefix("eq=") {
             return Ok(Self::Eq(memory::parse_number(number)?));
         }
@@ -113,8 +174,8 @@ impl FromStr for Rule {
             return Ok(Self::Seq(wanted));
         }
         match text {
-            "dec" => Ok(Self::Dec),
-            "inc" => Ok(Self::Inc),
+            "dec" => Ok(Self::Dec(None)),
+            "inc" => Ok(Self::Inc(None)),
             "same" => Ok(Self::Same),
             "changed" => Ok(Self::Changed),
             "distinct" => Ok(Self::Distinct),
@@ -287,8 +348,16 @@ mod tests {
 
     #[test]
     fn parse_rules() {
-        assert_eq!("dec".parse::<Rule>().unwrap(), Rule::Dec);
-        assert_eq!("inc".parse::<Rule>().unwrap(), Rule::Inc);
+        assert_eq!("dec".parse::<Rule>().unwrap(), Rule::Dec(None));
+        assert_eq!("inc".parse::<Rule>().unwrap(), Rule::Inc(None));
+        assert_eq!(
+            "dec<=25%".parse::<Rule>().unwrap(),
+            Rule::Dec(Some(Bound::Percent(25)))
+        );
+        assert_eq!(
+            "inc<=0x10".parse::<Rule>().unwrap(),
+            Rule::Inc(Some(Bound::Amount(16)))
+        );
         assert_eq!("same".parse::<Rule>().unwrap(), Rule::Same);
         assert_eq!("changed".parse::<Rule>().unwrap(), Rule::Changed);
         assert_eq!("distinct".parse::<Rule>().unwrap(), Rule::Distinct);
@@ -303,8 +372,16 @@ mod tests {
     fn reject_invalid_rules() {
         assert_eq!(
             "down".parse::<Rule>().unwrap_err().to_string(),
-            "unknown rule `down`; expected dec, inc, same, changed, distinct, eq=N, or seq=A,B,..."
+            "unknown rule `down`; expected dec, inc, same, changed, distinct, eq=N, or seq=A,B,..., where dec and inc take an optional <=N or <=N%"
         );
+        assert!(matches!(
+            "dec<=lots%".parse::<Rule>(),
+            Err(SearchError::Number(MemoryError::InvalidNumber(_)))
+        ));
+        assert!(matches!(
+            "inc<=".parse::<Rule>(),
+            Err(SearchError::Number(MemoryError::InvalidNumber(_)))
+        ));
         assert!(matches!(
             "eq=lots".parse::<Rule>(),
             Err(SearchError::Number(MemoryError::InvalidNumber(_)))
@@ -317,12 +394,12 @@ mod tests {
 
     #[test]
     fn match_rules() {
-        assert!(Rule::Dec.matches(&[280, 280, 273]));
-        assert!(!Rule::Dec.matches(&[280, 281, 273]));
-        assert!(!Rule::Dec.matches(&[280, 280]));
-        assert!(Rule::Inc.matches(&[1, 1, 2]));
-        assert!(!Rule::Inc.matches(&[1, 0, 2]));
-        assert!(!Rule::Inc.matches(&[1, 1]));
+        assert!(Rule::Dec(None).matches(&[280, 280, 273]));
+        assert!(!Rule::Dec(None).matches(&[280, 281, 273]));
+        assert!(!Rule::Dec(None).matches(&[280, 280]));
+        assert!(Rule::Inc(None).matches(&[1, 1, 2]));
+        assert!(!Rule::Inc(None).matches(&[1, 0, 2]));
+        assert!(!Rule::Inc(None).matches(&[1, 1]));
         assert!(Rule::Same.matches(&[5, 5, 5]));
         assert!(!Rule::Same.matches(&[5, 6, 5]));
         assert!(Rule::Changed.matches(&[5, 5, 6]));
@@ -335,6 +412,31 @@ mod tests {
         assert!(seq.matches(&[1, 99, 3]));
         assert!(!seq.matches(&[1, 99, 4]));
         assert!(!Rule::Same.matches(&[]));
+    }
+
+    #[test]
+    fn match_bounded_rules() {
+        let quarter = Rule::Dec(Some(Bound::Percent(25)));
+        assert!(quarter.matches(&[280, 273, 270]));
+        assert!(quarter.matches(&[280, 210]));
+        assert!(!quarter.matches(&[280, 209]));
+        assert!(!quarter.matches(&[280, 0]));
+        assert!(!quarter.matches(&[280, 280]));
+        assert!(!quarter.matches(&[280, 281, 273]));
+        let small = Rule::Inc(Some(Bound::Amount(10)));
+        assert!(small.matches(&[0, 10, 20]));
+        assert!(!small.matches(&[0, 11]));
+        assert!(!small.matches(&[5, 4, 6]));
+    }
+
+    #[test]
+    fn bound_moves() {
+        assert!(Bound::Percent(25).allows(4, 3));
+        assert!(!Bound::Percent(25).allows(3, 2));
+        assert!(Bound::Percent(100).allows(u32::MAX, 0));
+        assert!(!Bound::Percent(50).allows(0, 1));
+        assert!(Bound::Amount(u32::MAX).allows(0, u32::MAX));
+        assert!(!Bound::Amount(1).allows(2, 0));
     }
 
     #[test]
@@ -356,7 +458,7 @@ mod tests {
             vec![dump_with(0x0200_316C, Width::U16, 273)],
         ];
         assert_eq!(
-            query(Width::U16, Rule::Dec).find(&dumps),
+            query(Width::U16, Rule::Dec(None)).find(&dumps),
             vec![Match {
                 address: 0x0200_316C,
                 values: vec![280, 273],
@@ -405,7 +507,7 @@ mod tests {
             vec![dump_with(0x0200_0000, Width::U32, 0x0200_0000)],
             vec![dump_with(0x0200_0000, Width::U32, 0x0100_0000)],
         ];
-        let mut search = query(Width::U32, Rule::Dec);
+        let mut search = query(Width::U32, Rule::Dec(None));
         assert_eq!(search.find(&dumps).len(), 1);
         search.max = 0xFFFF;
         assert_eq!(search.find(&dumps).len(), 0);
