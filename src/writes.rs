@@ -1,8 +1,7 @@
 //! Records of which bytes of working RAM a game wrote, and the runs of bytes
 //! it left alone, where a hook can keep its own values.
 
-use crate::memory::{self, RAM_REGIONS};
-use std::fmt;
+use crate::memory::{self, RAM_REGIONS, Span};
 
 /// The bytes of working RAM written while writes were tracked.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -13,15 +12,6 @@ pub struct Written {
     /// [`memory::ram_addresses`], the low bit of each byte first, set if the
     /// byte was written.
     bits: Vec<u8>,
-}
-
-/// A run of bytes in one region of working RAM.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Span {
-    /// The address of the first byte.
-    pub start: u32,
-    /// The number of bytes.
-    pub size: u32,
 }
 
 impl Written {
@@ -65,20 +55,6 @@ impl Written {
         }
         spans.sort_by_key(|span| (std::cmp::Reverse(span.size), span.start));
         spans
-    }
-}
-
-impl fmt::Display for Span {
-    /// Writes the first and last addresses and the size, such as
-    /// `0x0203FF00-0x0203FFFF (256 bytes)`.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let last = self.start + self.size - 1;
-        let unit = if self.size == 1 { "byte" } else { "bytes" };
-        write!(
-            f,
-            "0x{:08X}-0x{last:08X} ({} {unit})",
-            self.start, self.size
-        )
     }
 }
 
@@ -155,19 +131,5 @@ mod tests {
                 size: 1
             }]
         );
-    }
-
-    #[test]
-    fn display_spans() {
-        let span = Span {
-            start: 0x0203_FF00,
-            size: 0x100,
-        };
-        assert_eq!(span.to_string(), "0x0203FF00-0x0203FFFF (256 bytes)");
-        let span = Span {
-            start: 0x0300_0000,
-            size: 1,
-        };
-        assert_eq!(span.to_string(), "0x03000000-0x03000000 (1 byte)");
     }
 }

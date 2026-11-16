@@ -32,7 +32,7 @@ A function called through a register or veneer has no `bl` naming it; find its c
 
 Thumb `bl` reaches only ±4 MB, so code in free space at the end of the ROM is reached by taking over a pointer the game already follows: a literal that a call site loads, or a vtable slot.
 
-1. Find free space with `peek` or `dis` past the end of the game's data: a run of `0xFF` or `0x00`. Start hooks at a round address inside it, leaving a gap after the game's last byte.
+1. Find free space with `free`, which lists the ROM's longest runs of `0xFF` or `0x00`. Pick the padding after the game's data, not a run of `0x00` in the middle of it, which may be a table the game reads. Start hooks at a round address inside it, leaving a gap after the game's last byte.
 2. Find the slots with `refs` on the function's address. It lists every word holding the pointer, but only some belong in `slots`: a hook that reads its caller's stack or registers is only right for callers that put them there. Check each candidate's call site with `dis` before listing it, and record the ones left out and why.
 3. Write the hook in a `.s` file. `ORIGINAL` is predefined as the pointer it replaces, so don't define it again.
    - To change the arguments, adjust the registers and tail-call with `ldr r3, =ORIGINAL` then `bx r3`, clobbering only registers the original is free to clobber.
