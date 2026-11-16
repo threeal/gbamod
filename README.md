@@ -172,6 +172,13 @@ replaces = 0x0804FD09
 slots = [0x08CBC850, 0x08CBC9F0]
 ```
 
+To find free space for `at`, list the longest runs of `0x00` or `0xFF` bytes in the ROM, each at least 16 bytes. Padding after the game's data is usually the longest; a run of `0x00` inside the data may be a table the game reads, so it's safer to start a hook at a round address in the padding, leaving a gap after the game's last byte:
+
+```sh
+gbamod free             # the 10 longest runs
+gbamod free --count 3
+```
+
 To find the slots, list the words in the ROM that hold the pointer. A Thumb function's address and the pointers to it differ only in the low bit, which is ignored, so either form finds both. The list ends with a `slots` line ready for the manifest:
 
 ```sh

@@ -182,6 +182,13 @@ mod cli {
                 gbamod::build::list(dir, &file, args.get_one::<u32>("at").copied())
                     .map_err(|err| err.to_string())
             }
+            Some(("free", args)) => gbamod::free::run(
+                dir,
+                args.get_one::<u32>("count")
+                    .copied()
+                    .unwrap_or(gbamod::free::DEFAULT_COUNT),
+            )
+            .map_err(|err| err.to_string()),
             Some(("refs", args)) => {
                 gbamod::refs::run(dir, number(args, "pointer")).map_err(|err| err.to_string())
             }
@@ -320,7 +327,7 @@ mod cli {
         ]
     }
 
-    fn modding_commands() -> [Command; 3] {
+    fn modding_commands() -> [Command; 4] {
         [
             Command::new("asm")
                 .about("Assemble a file of Thumb code and list it, the way the build places it if it's a hook")
@@ -328,6 +335,13 @@ mod cli {
                 .arg(
                     arg!(--at <address> "The address the code starts at, required unless it's a hook in the manifest")
                         .value_parser(memory::parse_number),
+                ),
+            Command::new("free")
+                .about("List the longest runs of 0x00 or 0xFF bytes in the game folder's ROM, where a hook's code can go")
+                .arg(
+                    arg!(--count <runs> "The most runs to list")
+                        .value_parser(value_parser!(u32))
+                        .default_value("10"),
                 ),
             Command::new("refs")
                 .about("List the words in the game folder's ROM that hold a pointer")

@@ -41,6 +41,29 @@ pub fn ram_addresses() -> impl Iterator<Item = u32> {
         .flat_map(|region| region.start..region.start + region.size)
 }
 
+/// A run of bytes in the GBA's address space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Span {
+    /// The address of the first byte.
+    pub start: u32,
+    /// The number of bytes.
+    pub size: u32,
+}
+
+impl std::fmt::Display for Span {
+    /// Writes the first and last addresses and the size, such as
+    /// `0x0203FF00-0x0203FFFF (256 bytes)`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let last = self.start + self.size - 1;
+        let unit = if self.size == 1 { "byte" } else { "bytes" };
+        write!(
+            f,
+            "0x{:08X}-0x{last:08X} ({} {unit})",
+            self.start, self.size
+        )
+    }
+}
+
 /// The number of bytes a peek prints when no count is given.
 pub const DEFAULT_PEEK_COUNT: u32 = 16;
 
@@ -171,6 +194,20 @@ pub fn hex_dump(address: u32, bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_spans() {
+        let span = Span {
+            start: 0x0203_FF00,
+            size: 0x100,
+        };
+        assert_eq!(span.to_string(), "0x0203FF00-0x0203FFFF (256 bytes)");
+        let span = Span {
+            start: 0x0300_0000,
+            size: 1,
+        };
+        assert_eq!(span.to_string(), "0x03000000-0x03000000 (1 byte)");
+    }
 
     #[test]
     fn parse_numbers() {

@@ -7,6 +7,7 @@ pub mod debug;
 pub mod disasm;
 #[cfg(not(tarpaulin_include))]
 pub mod emulator;
+pub mod free;
 pub mod game;
 pub mod keys;
 pub mod manifest;
